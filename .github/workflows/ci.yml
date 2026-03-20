@@ -31,4 +31,4 @@ jobs:
         run: python -m pytest -q
 
       - name: Compile package
-        run: python -m compileall fewshoter
+        run: python -m compileall __init__.py cli core data engine features

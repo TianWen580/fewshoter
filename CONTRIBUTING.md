@@ -19,7 +19,7 @@ pip install -r requirements-dev.txt
 
 ```bash
 python -m pytest
-python -m compileall fewshoter
+python -m compileall __init__.py cli core data engine features
 ```
 
 ## Pull requests

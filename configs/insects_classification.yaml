@@ -131,7 +131,7 @@ classification:
   text_feat_beta: 0.5
 
   # Optional: path to Python file defining desc_dict for class descriptions
-  desc_text_path: "src/engine/shared_libs/clip_fewshot/descriptions/insects_classification.py"
+  desc_text_path: "descriptions/insects_classification.py"
 
   # Dimensionality reduction (sklearn). Default off.
   enable_dim_reduction: false
