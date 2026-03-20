@@ -1,0 +1,184 @@
+# Configuration optimized for species classification
+# This configuration emphasizes visual features and fine-grained details
+
+model:
+  # Use larger model for better fine-grained recognition
+  clip_model_name: "ViT-L-14-quickgelu"
+  device: "cuda"
+  batch_size: 16  # Smaller batch size for larger model
+  image_size: 224
+  feature_dim: 768  # ViT-H/14 feature dimension
+  use_fp16: true
+  cache_features: true
+
+classification:
+  # Higher visual weight for fine-grained features
+  visual_weight: 0.8
+  text_weight: 0.2
+
+  # Higher confidence threshold for binary classification
+  confidence_threshold: 0.7
+
+  # More text probes for detailed bird descriptions
+  max_text_probes: 8
+
+  # Enable alignment for pose variations in species
+  use_feature_alignment: true
+  alignment_strength: 0.15
+
+  # New: Text calibration toggle
+  enable_text_calibration: true
+
+  # New: Local patch enhancement
+  local_patch_enhance: true
+  local_patch_weight: 0.25
+  local_patch_topk: 5
+
+  # New: Post-hoc logit calibration (global temperature). None disables.
+  global_logit_temperature: 0.9
+  enable_logit_bias: false
+
+  # Neighborhood Subspace Suppression (NSS)
+  enable_nss: false
+  nss_num_neighbors: 3
+  nss_proj_weight: 0.3
+  nss_bias_weight: 0.015
+
+
+  # Masked-Global pooling (foreground emphasis)
+  enable_masked_global: true
+  masked_global_weight: 0.5
+  masked_global_layer: "layer_9"
+  masked_global_source: "discriminative_mask"  # or "attention"
+
+  # Global subcenters on global features
+  enable_global_subcenters: true
+  global_subcenters_k: 3
+  global_subcenters_iters: 2
+  global_subcenters_fusion: true
+  global_subcenters_weight: 0.5
+
+  # Inference-time TTA
+  tta_enable: true
+  tta_hflip: true
+  tta_num_scales: 1
+  tta_scale_min: 0.9
+  tta_scale_max: 1.1
+
+
+  # Stage 1: Discriminative mining and subcenters
+  enable_discriminative_mining: true
+  discriminative_token_topk_ratio: 0.15
+  num_subcenters: 3
+  discriminative_global_weight: 0.6
+  discriminative_part_weight: 0.4
+
+  # Stage 4: Impostor-aware reranking and calibration
+  enable_impostor_rerank: true
+  impostor_rerank_strength: 0.5
+  enable_per_class_temperature: false
+  rejection_enable: false
+  rejection_margin_threshold: 0.05
+
+  # Score normalization across classes per query | 分数归一化（按查询对各类）
+  score_normalization: "zscore"  # "none" | "zscore" | "mean_center"
+
+  # Open-set / Unknown detection | 开放集/未知类拒识
+  unknown_enable: true
+  unknown_strategy: "zscore"          # 'absolute' | 'margin' | 'softmax_p' | 'zscore'
+  unknown_label: "UNKNOWN"
+  unknown_abs_threshold: 0.25         # for 'absolute' strategy
+  unknown_margin_threshold: 0.05      # for 'margin' strategy
+  unknown_pmax_threshold: 0.6         # for 'softmax_p' strategy
+  unknown_z_threshold: 1.0            # for 'zscore' strategy
+  softmax_temperature: 10.0           # temperature for softmax-based confidence
+
+  # SVM-based embedding classifier
+  use_svm: true
+  svm_model_path: "output/birdsurveillance/svm.pkl"  # Optional; will auto-save after training
+  svm_infer_mode: "svm_only"  # 'svm_only' | 'hybrid'
+  svm_hybrid_weight: 0.5  # Weight of SVM when in 'hybrid' mode
+  svm_kernel: "rbf"  # 'linear' | 'rbf' | 'poly' | 'sigmoid'
+  svm_C: 1.0
+  svm_gamma: "scale"  # 'scale' | 'auto' | float
+  svm_probability: true  # Whether to use Platt scaling for probabilities
+  svm_feature_layer: "global"  # 'global' | 'part' | 'both'
+  svm_use_class_weight: true  # Whether to use class weight 'balanced'
+
+  # Classification head (NN)
+  use_nn: false  # Whether to use neural network classifier
+  nn_infer_mode: "nn_only"  # 'nn_only' | 'hybrid'
+  nn_model_path: "output/birdsurveillance/nn_head.pt"  # Optional; will auto-save after training
+  nn_hidden_sizes: [512]  # List of hidden layer sizes
+  nn_activation: "relu"  # 'relu' | 'leaky_relu' | 'tanh' | 'sigmoid'
+  nn_dropout: 0.1  # Float between 0 and 1
+  nn_epochs: 20  # Number of training epochs
+  nn_lr: 1e-3  # Learning rate, float
+  nn_weight_decay: 1e-4  # L2 regularization weight
+  nn_batch_size: 64  # Training batch size
+  nn_early_stopping_patience: 5  # Epochs to wait before early stopping
+  nn_class_weight_balanced: true  # Whether to use balanced class weights
+  nn_feature_layer: "global"  # 'global' | 'part' | 'both'
+
+
+  # Support-set augmentation to enrich embeddings
+  enable_support_augmentation: true
+  support_aug_hflip: true
+  support_aug_multiplier: 1
+
+  # Use text similarity features in SVM/NN
+  use_text_sim_features: true
+  text_feat_beta: 0.5
+
+  # Optional: path to Python file defining desc_dict for class descriptions
+  desc_text_path: "src/engine/shared_libs/clip_fewshot/descriptions/birdsurveillance_classification.py"
+
+  # Dimensionality reduction (sklearn). Default off.
+  enable_dim_reduction: true
+  dim_reduction_method: "pca"
+  dim_reduction_n_components: 0.95
+  dim_reduction_whiten: false
+  dim_reduction_random_state: 42
+
+
+support_set:
+  min_shots_per_class: 1
+  max_shots_per_class: 50  # More shots for better prototypes
+
+  prototype_update_rate: 0.05
+  attribute_threshold: 0.3  # Lower threshold for attributes
+  save_prototypes: true
+  prototype_cache_dir: "cache/prototypes"
+
+  # New: Prototype EMA refinement
+  enable_prototype_ema: true
+  prototype_ema_momentum: 0.05
+  prototype_ema_min_conf: 0.85
+
+adapter:
+  use_tip_adapter: true  # Tip-Adapter
+  alpha: 0.5
+  beta: 50.0
+  # Optional small head (ArcFace/CosFace-like)
+  use_small_head: false
+  train_small_head: false
+  head_type: "arcface"  # or "cosface", "cosine"
+  margin: 0.5
+  scale: 30.0
+  subcenters: 1
+  train_epochs: 2
+  lr: 0.001
+  weight_decay: 0.0001
+
+
+visualization:
+  save_attention_maps: true  # Useful for species part analysis
+  save_saliency_maps: true
+  output_dir: "output/analysis"
+  heatmap_alpha: 0.4
+  colormap: "viridis"
+
+# Bird-specific settings
+random_seed: 42
+num_workers: 2  # Fewer workers for larger model
+log_level: "INFO"

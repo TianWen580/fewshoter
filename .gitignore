@@ -1,0 +1,54 @@
+# Python
+__pycache__/
+*.py[cod]
+*.pyo
+*.pyd
+*.egg-info/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.coverage
+htmlcov/
+
+# Environments
+.env
+.env.*
+.venv/
+venv/
+env/
+
+# Editors
+.vscode/
+.idea/
+
+# OS
+.DS_Store
+
+# Build artifacts
+build/
+dist/
+*.whl
+
+# Runtime outputs
+cache/
+outputs/
+inference_results/
+evaluation_results/
+uploads/
+logs/
+
+# ML artifacts and data
+*.pt
+*.pth
+*.onnx
+*.ckpt
+*.pkl
+*.joblib
+data/raw/
+data/processed/
+
+# Secrets
+*.pem
+*.key
+credentials.json
+service_account.json
