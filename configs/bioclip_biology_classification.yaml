@@ -1,0 +1,201 @@
+# BioCLIP Biology Classification Configuration
+#
+# This configuration is optimized for biological species classification
+# using BioCLIP models trained on the TreeOfLife dataset.
+#
+# BioCLIP Models:
+#   - BioCLIP (ViT-B/16): Trained on TreeOfLife-10M (10M images, 450K+ species)
+#   - BioCLIP-2 (ViT-L/14): Trained on TreeOfLife-200M (214M images, 952K taxa)
+#   - BioCLIP-2.5 (ViT-H/14): Latest version with 18% improvement over BioCLIP
+
+model:
+  # BioCLIP model selection
+  # Options: BioCLIP, BioCLIP-2, BioCLIP-2.5
+  clip_model_name: "BioCLIP-2"
+  
+  # Device configuration
+  device: "auto"  # auto, cuda, or cpu
+  
+  # Batch processing
+  batch_size: 32
+  image_size: 224
+  feature_dim: 768  # 768 for BioCLIP/BioCLIP-2, 1024 for BioCLIP-2.5
+  
+  # Feature caching
+  cache_features: true
+  cache_backend: "mmap"  # memory, disk, or mmap
+  cache_dir: "cache/bioclip_features"
+
+classification:
+  # Weight balance - higher visual weight for morphological features
+  visual_weight: 0.8
+  text_weight: 0.2
+  
+  # Confidence threshold
+  confidence_threshold: 0.6
+  
+  # Text probes
+  max_text_probes: 10  # More probes for biological diversity
+  
+  # Feature alignment
+  use_feature_alignment: true
+  alignment_strength: 0.1
+  
+  # Text calibration - helps with species descriptions
+  enable_text_calibration: true
+  
+  # Local patch enhancement for fine details (wing patterns, markings)
+  local_patch_enhance: true
+  local_patch_weight: 0.35
+  local_patch_topk: 5
+  
+  # Logit calibration
+  global_logit_temperature: null
+  enable_logit_bias: true
+  
+  # Neighborhood Subspace Suppression (NSS) - critical for similar species
+  # NSS helps distinguish between visually similar species by suppressing
+  # features shared with neighbor classes
+  enable_nss: true
+  nss_num_neighbors: 3
+  nss_proj_weight: 0.5
+  nss_bias_weight: 0.05
+  
+  # Path to custom descriptions file (optional)
+  # Format: Python file with 'classes' list and 'descriptions' dict
+  # Example: "descriptions/butterfly_species.py"
+  desc_text_path: null
+  
+  # Stage 1: Discriminative mining
+  # Identifies discriminative regions between similar species
+  enable_discriminative_mining: true
+  discriminative_token_topk_ratio: 0.15
+  num_subcenters: 3
+  discriminative_global_weight: 0.6
+  discriminative_part_weight: 0.4
+  
+  # Stage 4: Impostor-aware reranking
+  enable_impostor_rerank: true
+  impostor_rerank_strength: 0.5
+  enable_per_class_temperature: false
+  
+  # Rejection/unknown detection
+  rejection_enable: false
+  rejection_margin_threshold: 0.05
+  
+  # Score normalization
+  score_normalization: "none"  # none, zscore, mean_center
+  
+  # Open-set detection
+  unknown_enable: true
+  unknown_strategy: "zscore"
+  unknown_label: "UNKNOWN"
+  unknown_abs_threshold: 0.25
+  unknown_margin_threshold: 0.05
+  unknown_pmax_threshold: 0.6
+  unknown_z_threshold: 1.0
+  softmax_temperature: 10.0
+  
+  # Optional SVM classifier
+  use_svm: false
+  svm_kernel: "rbf"
+  svm_C: 1.0
+  svm_gamma: "scale"
+  svm_probability: true
+  svm_feature_layer: "global"
+  svm_model_path: null
+  svm_infer_mode: "svm_only"
+  svm_hybrid_weight: 0.5
+  svm_use_class_weight: true
+  
+  # Optional Neural Network classifier
+  use_nn: false
+  nn_hidden_sizes: [512, 256]
+  nn_activation: "relu"
+  nn_dropout: 0.1
+  nn_epochs: 20
+  nn_lr: 0.001
+  nn_weight_decay: 0.0001
+  nn_batch_size: 64
+  nn_early_stopping_patience: 5
+  nn_class_weight_balanced: true
+  nn_feature_layer: "global"
+  nn_model_path: null
+  nn_infer_mode: "nn_only"
+  nn_hybrid_weight: 0.5
+  
+  # Masked-Global pooling
+  enable_masked_global: true
+  masked_global_weight: 0.5
+  masked_global_layer: "layer_9"
+  masked_global_source: "discriminative_mask"
+  
+  # Global subcenters
+  enable_global_subcenters: true
+  global_subcenters_k: 3
+  global_subcenters_iters: 2
+  global_subcenters_fusion: true
+  global_subcenters_weight: 0.5
+  
+  # Test-time augmentation
+  tta_enable: true
+  tta_hflip: true
+  tta_num_scales: 3
+  tta_scale_min: 0.9
+  tta_scale_max: 1.1
+
+adapter:
+  # Tip-Adapter style support
+  use_tip_adapter: true
+  alpha: 0.5
+  beta: 50.0
+  
+  # Optional small head training
+  use_small_head: false
+  train_small_head: false
+  head_type: "arcface"
+  margin: 0.5
+  scale: 30.0
+  subcenters: 1
+  train_epochs: 2
+  lr: 0.001
+  weight_decay: 0.0001
+
+support_set:
+  # Support set size limits
+  min_shots_per_class: 1
+  max_shots_per_class: 10  # Allow more shots for complex species
+  
+  # Prototype settings
+  prototype_update_rate: 0.1
+  attribute_threshold: 0.5
+  save_prototypes: true
+  prototype_cache_dir: "cache/bioclip_prototypes"
+  
+  # Prototype refinement
+  enable_prototype_ema: true
+  prototype_ema_momentum: 0.05
+  prototype_ema_min_conf: 0.8
+  
+  # Embedding cache
+  save_embeddings: true
+  embedding_cache_filename: "embed.json"
+  load_embeddings_on_init: false
+  
+  # Support-set augmentation
+  enable_support_augmentation: true
+  support_aug_hflip: true
+  support_aug_multiplier: 1
+
+visualization:
+  save_attention_maps: true
+  save_saliency_maps: true
+  output_dir: "outputs/bioclip"
+  heatmap_alpha: 0.3
+  colormap: "jet"
+  save_calibration_curves: true
+
+# System settings
+random_seed: 42
+num_workers: 4
+log_level: "INFO"

@@ -183,6 +183,19 @@ class MultiScaleFeatureExtractor:
                     "hf-hub:laion/CLIP-ViT-B-32-laion2B-s34B-b79K",
                     None,
                 ),
+                # BioCLIP models (Imageomics) - trained on TreeOfLife dataset for biodiversity
+                # BioCLIP ViT-B/16 - trained on TreeOfLife-10M (10M images, 450K+ species)
+                "BioCLIP": ("hf-hub:imageomics/bioclip", None),
+                "BioCLIP-B/16": ("hf-hub:imageomics/bioclip", None),
+                "bioclip": ("hf-hub:imageomics/bioclip", None),
+                # BioCLIP-2 ViT-L/14 - trained on TreeOfLife-200M (214M images, 952K taxa)
+                "BioCLIP-2": ("hf-hub:imageomics/bioclip-2", None),
+                "BioCLIP-L/14": ("hf-hub:imageomics/bioclip-2", None),
+                "bioclip-2": ("hf-hub:imageomics/bioclip-2", None),
+                # BioCLIP 2.5 ViT-H/14 - latest version with improved performance
+                "BioCLIP-2.5": ("hf-hub:imageomics/bioclip-2.5-vith14", None),
+                "BioCLIP-H/14": ("hf-hub:imageomics/bioclip-2.5-vith14", None),
+                "bioclip-2.5": ("hf-hub:imageomics/bioclip-2.5-vith14", None),
             }
             if name in mappings:
                 return mappings[name]
@@ -242,9 +255,7 @@ class MultiScaleFeatureExtractor:
             grid_size = None
             if hasattr(self.model.visual, "positional_embedding"):
                 try:
-                    grid_size = int(
-                        (self.model.visual.positional_embedding.shape[1] - 1) ** 0.5
-                    )
+                    grid_size = int((self.model.visual.positional_embedding.shape[1] - 1) ** 0.5)
                 except Exception:
                     grid_size = None
             if grid_size is None and hasattr(self.model.visual, "pos_embed"):
@@ -266,9 +277,7 @@ class MultiScaleFeatureExtractor:
             # ResNet-style encoder
             self.is_vit = False
             try:
-                self.feature_dim = (
-                    self.model.visual.attnpool.positional_embedding.shape[-1]
-                )
+                self.feature_dim = self.model.visual.attnpool.positional_embedding.shape[-1]
             except Exception:
                 self.feature_dim = 1024
             self.num_layers = 4  # ResNet has 4 main blocks
@@ -350,10 +359,7 @@ class MultiScaleFeatureExtractor:
                         cached = self.feature_cache.get(cache_key)
                         if cached is not None:
                             return cached
-                    elif (
-                        isinstance(self.feature_cache, dict)
-                        and cache_key in self.feature_cache
-                    ):
+                    elif isinstance(self.feature_cache, dict) and cache_key in self.feature_cache:
                         return self.feature_cache[cache_key]
                 except Exception:
                     pass
@@ -398,9 +404,7 @@ class MultiScaleFeatureExtractor:
                     spatial_feat = feat[:, 1:, :]  # Remove CLS token
                     batch_size, seq_len, feat_dim = spatial_feat.shape
                     grid_size = int(seq_len**0.5)
-                    spatial_feat = spatial_feat.reshape(
-                        batch_size, grid_size, grid_size, feat_dim
-                    )
+                    spatial_feat = spatial_feat.reshape(batch_size, grid_size, grid_size, feat_dim)
                     spatial_feat = spatial_feat.permute(0, 3, 1, 2)  # [B, C, H, W]
                     features[name] = spatial_feat
                 else:
