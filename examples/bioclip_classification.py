@@ -32,26 +32,26 @@ def main():
     parser.add_argument(
         "--support_dir",
         type=str,
-        required=True,
+        default="assets/supportset/野猪",
         help="Path to biology support set directory",
     )
     parser.add_argument(
         "--query_image",
         type=str,
-        required=True,
+        default="assets/demo/一群野猪.jpg",
         help="Path to query image of biological specimen",
     )
     parser.add_argument(
         "--model",
         type=str,
-        default="BioCLIP-2",
+        default="BioCLIP",
         choices=["BioCLIP", "BioCLIP-2", "BioCLIP-2.5"],
         help="BioCLIP model variant",
     )
     parser.add_argument(
         "--descriptions",
         type=str,
-        default=None,
+        default="descriptions/wildboar_classification.py",
         help="Path to Python file with class descriptions (optional)",
     )
     parser.add_argument(
@@ -139,13 +139,17 @@ def main():
     result = classifier.classify(
         args.query_image,
         return_scores=True,
-        return_attention=True,
-        top_k=5,
+        return_details=True,
     )
 
-    predicted_class = result["label"]
-    confidence = result["confidence"]
-    all_scores = result.get("all_scores", {})
+    if isinstance(result, tuple):
+        predicted_class, details = result
+    else:
+        predicted_class = result
+        details = {}
+
+    confidence = details.get("confidence", 0.0)
+    all_scores = details.get("all_scores", {})
 
     # Display results
     print(f"\n📷 Query Image: {args.query_image}")
