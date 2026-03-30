@@ -83,13 +83,13 @@ def main():
     config.model.clip_model_name = args.model
     config.model.device = args.device
     config.model.cache_features = True
+    config.model.batch_size = 4
 
-    # Biology-optimized classification settings
-    config.classification.visual_weight = 0.8  # Higher visual weight for morphology
+    config.classification.visual_weight = 0.8
     config.classification.text_weight = 0.2
     config.classification.confidence_threshold = 0.6
-    config.classification.enable_discriminative_mining = True  # Better for fine-grained
-    config.classification.enable_impostor_rerank = True
+    config.classification.enable_discriminative_mining = False
+    config.classification.enable_impostor_rerank = False
 
     # Enable NSS if requested (helps distinguish similar species)
     if args.enable_nss:
