@@ -52,6 +52,7 @@ from .features.feature_extractor import (
     MultiScaleFeatureExtractor,
     create_feature_extractor,
 )
+from .modalities.image import CLIPImageEncoderAdapter
 from .features.attribute_generator import AttributeGenerator
 from .features.feature_aligner import FeatureAligner
 from .core.config import Config
@@ -63,6 +64,7 @@ __all__ = [
     "FineGrainedClassifier",
     "SupportSetManager",
     "MultiScaleFeatureExtractor",
+    "CLIPImageEncoderAdapter",
     "AttributeGenerator",
     "FeatureAligner",
     "Config",

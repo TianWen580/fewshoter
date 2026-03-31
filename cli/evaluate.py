@@ -10,20 +10,26 @@ Usage:
 """
 
 import argparse
+import importlib
 import logging
 import sys
 from pathlib import Path
-import torch
 import json
-import numpy as np
 from collections import defaultdict
-import matplotlib.pyplot as plt
-import seaborn as sns
+from typing import Any, Sequence
+
+torch = importlib.import_module("torch")
+np = importlib.import_module("numpy")
+plt = importlib.import_module("matplotlib.pyplot")
+sns = importlib.import_module("seaborn")
 
 from ..core.config import Config
 from ..features.feature_extractor import create_feature_extractor
 from ..data.support_manager import SupportSetManager
+from ..data.samplers import EpisodeSampler
 from ..engine.classifier import create_classifier
+from ..learners.prototypical import PrototypicalLearner
+from ..evaluation.episodic import EpisodicEvaluator
 from ..core.utils import (
     setup_logging,
     set_random_seed,
@@ -33,7 +39,7 @@ from ..core.utils import (
 )
 
 
-def parse_arguments():
+def parse_arguments() -> argparse.Namespace:
     """Parse command line arguments"""
     parser = argparse.ArgumentParser(
         description="Evaluate CLIP few-shot classification performance"
@@ -62,9 +68,7 @@ def parse_arguments():
         help="Output directory for evaluation results",
     )
 
-    parser.add_argument(
-        "--batch_size", type=int, default=32, help="Batch size for processing"
-    )
+    parser.add_argument("--batch_size", type=int, default=32, help="Batch size for processing")
 
     parser.add_argument(
         "--device",
@@ -92,8 +96,57 @@ def parse_arguments():
         "--save_predictions", action="store_true", help="Save individual predictions"
     )
 
+    parser.add_argument("--save_plots", action="store_true", help="Save evaluation plots")
+
     parser.add_argument(
-        "--save_plots", action="store_true", help="Save evaluation plots"
+        "--evaluation_mode",
+        type=str,
+        default="legacy",
+        choices=["legacy", "episodic", "compare"],
+        help="Evaluation mode: keep legacy path by default, enable episodic modes opt-in",
+    )
+
+    parser.add_argument(
+        "--num_episodes",
+        type=int,
+        default=100,
+        help="Number of episodic tasks for episodic evaluation modes",
+    )
+
+    parser.add_argument(
+        "--episode_n_way",
+        type=int,
+        default=5,
+        help="Number of classes per episodic task (N-way)",
+    )
+
+    parser.add_argument(
+        "--episode_k_shot",
+        type=int,
+        default=1,
+        help="Number of support examples per class in episodic tasks (K-shot)",
+    )
+
+    parser.add_argument(
+        "--episode_num_queries",
+        type=int,
+        default=5,
+        help="Number of query examples per class in episodic tasks",
+    )
+
+    parser.add_argument(
+        "--episode_split",
+        type=str,
+        default="none",
+        choices=["none", "base", "novel"],
+        help="Optional split selector for episodic tasks",
+    )
+
+    parser.add_argument(
+        "--confidence_level",
+        type=float,
+        default=0.95,
+        help="Confidence level for episodic confidence intervals",
     )
 
     parser.add_argument(
@@ -125,7 +178,7 @@ def setup_device(device_arg: str) -> str:
     return device
 
 
-def load_test_dataset(test_dir: Path) -> tuple:
+def load_test_dataset(test_dir: Path) -> tuple[list[str], list[str], list[str]]:
     """Load test dataset and return image paths with labels"""
     if not test_dir.exists():
         raise FileNotFoundError(f"Test directory not found: {test_dir}")
@@ -165,14 +218,13 @@ def load_test_dataset(test_dir: Path) -> tuple:
     return image_paths, true_labels, sorted(set(true_labels))
 
 
-def compute_metrics(y_true: list, y_pred: list, class_names: list) -> dict:
+def compute_metrics(y_true: list[str], y_pred: list[str], class_names: list[str]) -> dict[str, Any]:
     """Compute classification metrics"""
-    from sklearn.metrics import (
-        accuracy_score,
-        precision_recall_fscore_support,
-        confusion_matrix,
-        classification_report,
-    )
+    sklearn_metrics = importlib.import_module("sklearn.metrics")
+    accuracy_score = sklearn_metrics.accuracy_score
+    precision_recall_fscore_support = sklearn_metrics.precision_recall_fscore_support
+    confusion_matrix = sklearn_metrics.confusion_matrix
+    classification_report = sklearn_metrics.classification_report
 
     # Basic metrics
     accuracy = accuracy_score(y_true, y_pred)
@@ -182,9 +234,7 @@ def compute_metrics(y_true: list, y_pred: list, class_names: list) -> dict:
 
     # Per-class metrics
     precision_per_class, recall_per_class, f1_per_class, support_per_class = (
-        precision_recall_fscore_support(
-            y_true, y_pred, average=None, labels=class_names
-        )
+        precision_recall_fscore_support(y_true, y_pred, average=None, labels=class_names)
     )
 
     # Confusion matrix
@@ -214,7 +264,7 @@ def compute_metrics(y_true: list, y_pred: list, class_names: list) -> dict:
     return metrics
 
 
-def plot_confusion_matrix(cm: np.ndarray, class_names: list, output_path: Path):
+def plot_confusion_matrix(cm: Any, class_names: list[str], output_path: Path) -> None:
     """Plot and save confusion matrix"""
     plt.figure(figsize=(12, 10))
 
@@ -242,7 +292,7 @@ def plot_confusion_matrix(cm: np.ndarray, class_names: list, output_path: Path):
     plt.close()
 
 
-def plot_per_class_metrics(metrics: dict, output_path: Path):
+def plot_per_class_metrics(metrics: dict[str, Any], output_path: Path) -> None:
     """Plot per-class metrics"""
     class_names = list(metrics["per_class_metrics"].keys())
     precisions = [metrics["per_class_metrics"][cls]["precision"] for cls in class_names]
@@ -271,7 +321,7 @@ def plot_per_class_metrics(metrics: dict, output_path: Path):
     plt.close()
 
 
-def analyze_confidence_distribution(results: list, output_path: Path):
+def analyze_confidence_distribution(results: list[dict[str, Any]], output_path: Path) -> None:
     """Analyze and plot confidence distribution"""
     confidences = [r["confidence"] for r in results if "confidence" in r]
     correct_confidences = [
@@ -306,7 +356,107 @@ def analyze_confidence_distribution(results: list, output_path: Path):
     plt.close()
 
 
-def main():
+def _build_class_to_samples(
+    image_paths: Sequence[str | Path],
+    true_labels: list[str],
+) -> dict[str, list[str]]:
+    class_to_samples: dict[str, list[str]] = defaultdict(list)
+    for path, label in zip(image_paths, true_labels):
+        class_to_samples[str(label)].append(str(path))
+    return dict(class_to_samples)
+
+
+def _split_classes_for_mode(class_names: list[str], split: str | None) -> list[str]:
+    if split is None:
+        return list(class_names)
+
+    sorted_classes = sorted(class_names)
+    if len(sorted_classes) < 2:
+        raise ValueError("episodic split requires at least 2 classes")
+
+    midpoint = max(1, len(sorted_classes) // 2)
+    base_classes = sorted_classes[:midpoint]
+    novel_classes = sorted_classes[midpoint:]
+
+    if split == "base":
+        return base_classes
+    if split == "novel":
+        if not novel_classes:
+            raise ValueError("novel split has no classes available")
+        return novel_classes
+    raise ValueError("split must be one of: None, 'base', 'novel'")
+
+
+def _embed_paths(feature_extractor: Any, paths: list[str]) -> Any:
+    encoded = feature_extractor.encode(paths)
+    if "global" not in encoded:
+        raise ValueError("feature extractor must return a 'global' embedding key")
+    return torch.as_tensor(encoded["global"])
+
+
+def _build_episodic_episodes(
+    config: Config,
+    image_paths: list[str],
+    true_labels: list[str],
+) -> tuple[list[Any], list[str]]:
+    class_to_samples = _build_class_to_samples(image_paths, true_labels)
+    all_classes = sorted(class_to_samples)
+    allowed_classes = _split_classes_for_mode(all_classes, config.evaluation.split)
+
+    sampler = EpisodeSampler(class_to_samples=class_to_samples)
+    episodes: list[Any] = []
+    for index in range(config.evaluation.episodes):
+        episode = sampler.sample_episode(
+            n_way=config.episode.n_way,
+            k_shot=config.episode.k_shot,
+            num_queries=config.episode.num_queries,
+            split=None,
+            classes=allowed_classes,
+            seed=int(config.random_seed) + index,
+        )
+        episodes.append(episode)
+
+    return episodes, allowed_classes
+
+
+def _materialize_episode_embeddings(feature_extractor: Any, episodes: list[Any]) -> None:
+    for episode in episodes:
+        support_items = [str(item) for item in (episode.support_items or [])]
+        query_items = [str(item) for item in (episode.query_items or [])]
+
+        if not support_items or not query_items:
+            raise ValueError("episodic evaluation requires support and query items")
+
+        episode.support_embeddings = _embed_paths(feature_extractor, support_items)
+        episode.query_embeddings = _embed_paths(feature_extractor, query_items)
+
+
+class _LegacyEpisodeLearner:
+    def __init__(self, classifier: Any):
+        self.classifier = classifier
+
+    def predict_episode(self, episode: Any) -> Any:
+        query_items = [str(item) for item in (episode.query_items or [])]
+        class_names = list(episode.class_names or [])
+        if not query_items or not class_names:
+            raise ValueError("episode must define query_items and class_names")
+
+        results = self.classifier.classify_batch(
+            query_items,
+            return_scores=True,
+            allowed_classes=class_names,
+        )
+        class_to_idx = {name: idx for idx, name in enumerate(class_names)}
+        predicted = []
+        for result in results:
+            pred_name = result["predicted_class"]
+            if pred_name not in class_to_idx:
+                raise ValueError(f"legacy classifier predicted class outside episode: {pred_name}")
+            predicted.append(class_to_idx[pred_name])
+        return torch.tensor(predicted, dtype=torch.long)
+
+
+def main() -> None:
     """Main evaluation function"""
     args = parse_arguments()
 
@@ -357,12 +507,17 @@ def main():
         config.model.device = device
         config.classification.visual_weight = args.visual_weight
         config.classification.text_weight = args.text_weight
+        config.evaluation.mode = args.evaluation_mode
+        config.evaluation.episodes = args.num_episodes
+        config.evaluation.confidence_level = args.confidence_level
+        config.evaluation.split = None if args.episode_split == "none" else args.episode_split
+        config.episode.n_way = args.episode_n_way
+        config.episode.k_shot = args.episode_k_shot
+        config.episode.num_queries = args.episode_num_queries
 
         # Create components
         feature_extractor = create_feature_extractor(config)
-        support_manager = SupportSetManager.from_prototypes(
-            prototypes_path, feature_extractor
-        )
+        support_manager = SupportSetManager.from_prototypes(prototypes_path, feature_extractor)
         classifier = create_classifier(support_manager, config)
 
         # Check class compatibility
@@ -374,78 +529,121 @@ def main():
             logger.error(f"Test classes not in support set: {missing_classes}")
             sys.exit(1)
 
-        logger.info(
-            f"Evaluating on {len(test_classes)} classes with {len(image_paths)} images"
-        )
+        logger.info(f"Evaluating on {len(test_classes)} classes with {len(image_paths)} images")
 
-        # Perform inference
-        logger.info("Running inference on test set...")
+        if args.evaluation_mode == "legacy":
+            logger.info("Running legacy evaluation mode")
+            with Timer("Test set inference"):
+                image_inputs: list[Any] = list(image_paths)
+                results = classifier.classify_batch(
+                    image_inputs, batch_size=args.batch_size, return_scores=True
+                )
 
-        with Timer("Test set inference"):
-            results = classifier.classify_batch(
-                image_paths, batch_size=args.batch_size, return_scores=True
-            )
+            for i, result in enumerate(results):
+                result["true_class"] = true_labels[i]
 
-        # Add true labels to results
-        for i, result in enumerate(results):
-            result["true_class"] = true_labels[i]
+            predicted_labels = [r["predicted_class"] for r in results]
+            logger.info("Computing evaluation metrics...")
+            metrics = compute_metrics(true_labels, predicted_labels, test_class_names)
 
-        # Extract predictions
-        predicted_labels = [r["predicted_class"] for r in results]
+            print("\n" + "=" * 60)
+            print("EVALUATION RESULTS")
+            print("=" * 60)
+            print(f"Accuracy: {metrics['accuracy']:.3f}")
+            print(f"Precision (weighted): {metrics['precision_weighted']:.3f}")
+            print(f"Recall (weighted): {metrics['recall_weighted']:.3f}")
+            print(f"F1-Score (weighted): {metrics['f1_weighted']:.3f}")
+            print("\nPer-class results:")
+            for class_name in test_class_names:
+                class_metrics = metrics["per_class_metrics"][class_name]
+                print(f"  {class_name}:")
+                print(f"    Precision: {class_metrics['precision']:.3f}")
+                print(f"    Recall: {class_metrics['recall']:.3f}")
+                print(f"    F1-Score: {class_metrics['f1']:.3f}")
+                print(f"    Support: {class_metrics['support']}")
+            print("=" * 60)
 
-        # Compute metrics
-        logger.info("Computing evaluation metrics...")
-        metrics = compute_metrics(true_labels, predicted_labels, test_class_names)
+            logger.info("Saving evaluation results...")
+            metrics_path = output_dir / "evaluation_metrics.json"
+            with open(metrics_path, "w") as f:
+                json.dump(metrics, f, indent=2)
 
-        # Print results
-        print("\n" + "=" * 60)
-        print("EVALUATION RESULTS")
-        print("=" * 60)
-        print(f"Accuracy: {metrics['accuracy']:.3f}")
-        print(f"Precision (weighted): {metrics['precision_weighted']:.3f}")
-        print(f"Recall (weighted): {metrics['recall_weighted']:.3f}")
-        print(f"F1-Score (weighted): {metrics['f1_weighted']:.3f}")
-        print("\nPer-class results:")
-        for class_name in test_class_names:
-            class_metrics = metrics["per_class_metrics"][class_name]
-            print(f"  {class_name}:")
-            print(f"    Precision: {class_metrics['precision']:.3f}")
-            print(f"    Recall: {class_metrics['recall']:.3f}")
-            print(f"    F1-Score: {class_metrics['f1']:.3f}")
-            print(f"    Support: {class_metrics['support']}")
-        print("=" * 60)
+            if args.save_predictions:
+                predictions_path = output_dir / "predictions.json"
+                with open(predictions_path, "w") as f:
+                    json.dump(results, f, indent=2)
 
-        # Save results
-        logger.info("Saving evaluation results...")
+            if args.save_plots:
+                logger.info("Generating evaluation plots...")
+                cm_path = output_dir / "confusion_matrix.png"
+                plot_confusion_matrix(
+                    np.array(metrics["confusion_matrix"]), test_class_names, cm_path
+                )
+                metrics_plot_path = output_dir / "per_class_metrics.png"
+                plot_per_class_metrics(metrics, metrics_plot_path)
+                confidence_path = output_dir / "confidence_distribution.png"
+                analyze_confidence_distribution(results, confidence_path)
+        else:
+            logger.info(f"Running {args.evaluation_mode} evaluation mode")
+            episodes, allowed_classes = _build_episodic_episodes(config, image_paths, true_labels)
+            _materialize_episode_embeddings(feature_extractor, episodes)
+            evaluator = EpisodicEvaluator(confidence_level=config.evaluation.confidence_level)
 
-        # Save metrics
-        metrics_path = output_dir / "evaluation_metrics.json"
-        with open(metrics_path, "w") as f:
-            json.dump(metrics, f, indent=2)
+            if args.evaluation_mode == "episodic":
+                prototypical_learner = PrototypicalLearner()
+                metrics = evaluator.evaluate(
+                    prototypical_learner,
+                    episodes,
+                    split=config.evaluation.split,
+                    allowed_classes=allowed_classes,
+                )
+                payload = {
+                    "mode": "episodic",
+                    "accuracy": metrics.accuracy,
+                    "confidence_interval": metrics.confidence_interval,
+                    "per_class_accuracy": metrics.per_class_accuracy,
+                }
+                print("\n" + "=" * 60)
+                print("EPISODIC EVALUATION RESULTS")
+                print("=" * 60)
+                print(f"Accuracy: {metrics.accuracy:.3f}")
+                print(f"Confidence Interval (+/-): {metrics.confidence_interval:.3f}")
+                print("=" * 60)
+            elif args.evaluation_mode == "compare":
+                comparison = evaluator.compare(
+                    legacy_learner=_LegacyEpisodeLearner(classifier),
+                    prototypical_learner=PrototypicalLearner(),
+                    episodes=episodes,
+                    split=config.evaluation.split,
+                    allowed_classes=allowed_classes,
+                )
+                payload = {
+                    "mode": "compare",
+                    "legacy": {
+                        "accuracy": comparison.legacy.accuracy,
+                        "confidence_interval": comparison.legacy.confidence_interval,
+                        "per_class_accuracy": comparison.legacy.per_class_accuracy,
+                    },
+                    "prototypical": {
+                        "accuracy": comparison.prototypical.accuracy,
+                        "confidence_interval": comparison.prototypical.confidence_interval,
+                        "per_class_accuracy": comparison.prototypical.per_class_accuracy,
+                    },
+                    "accuracy_delta": comparison.accuracy_delta,
+                }
+                print("\n" + "=" * 60)
+                print("EPISODIC COMPARISON RESULTS")
+                print("=" * 60)
+                print(f"Legacy accuracy: {comparison.legacy.accuracy:.3f}")
+                print(f"Prototypical accuracy: {comparison.prototypical.accuracy:.3f}")
+                print(f"Accuracy delta: {comparison.accuracy_delta:.3f}")
+                print("=" * 60)
+            else:
+                raise ValueError("evaluation_mode must be one of: legacy, episodic, compare")
 
-        # Save predictions if requested
-        if args.save_predictions:
-            predictions_path = output_dir / "predictions.json"
-            with open(predictions_path, "w") as f:
-                json.dump(results, f, indent=2)
-
-        # Generate plots if requested
-        if args.save_plots:
-            logger.info("Generating evaluation plots...")
-
-            # Confusion matrix
-            cm_path = output_dir / "confusion_matrix.png"
-            plot_confusion_matrix(
-                np.array(metrics["confusion_matrix"]), test_class_names, cm_path
-            )
-
-            # Per-class metrics
-            metrics_plot_path = output_dir / "per_class_metrics.png"
-            plot_per_class_metrics(metrics, metrics_plot_path)
-
-            # Confidence distribution
-            confidence_path = output_dir / "confidence_distribution.png"
-            analyze_confidence_distribution(results, confidence_path)
+            metrics_path = output_dir / "evaluation_metrics.json"
+            with open(metrics_path, "w") as f:
+                json.dump(payload, f, indent=2)
 
         logger.info(f"Evaluation completed. Results saved to: {output_dir}")
         print(f"\nResults saved to: {output_dir}")

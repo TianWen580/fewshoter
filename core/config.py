@@ -5,12 +5,13 @@ This module provides centralized configuration management for all system compone
 including model parameters, feature extraction settings, and classification thresholds.
 """
 
-import os
 import json
 import yaml
-from typing import Dict, Any, Optional
+from typing import Dict, Any, Optional, Union
 from dataclasses import dataclass, asdict, field
 from pathlib import Path
+
+from .episode import EpisodeConfig
 
 
 @dataclass
@@ -28,6 +29,65 @@ class ModelConfig:
     cache_backend: str = "mmap"
     # Directory for on-disk feature cache
     cache_dir: str = "cache/clip_features"
+    enable_lora: bool = False
+    lora_rank: int = 8
+    lora_alpha: float = 16.0
+    lora_dropout: float = 0.0
+    lora_target_modules: list[str] = field(default_factory=lambda: ["attn", "mlp", "proj"])
+
+
+@dataclass
+class EncoderConfig:
+    """Configuration for encoder/modality selection and embedding parameters.
+
+    This dataclass configures which encoder to use (e.g., CLIP, Perch),
+    the target modality (image, audio), and embedding normalization settings.
+
+    Attributes:
+        modality: Target modality for encoding ('image', 'audio', etc.)
+        encoder_name: Name of the encoder architecture ('clip', 'perch', etc.)
+        embedding_dim: Dimensionality of output embeddings
+        normalize_embeddings: Whether to L2-normalize embeddings
+        output_key: Key for selecting output feature type ('global', 'local', etc.)
+        runtime_framework: Framework for runtime execution ('torch', 'onnx', etc.)
+        checkpoint: Path to custom checkpoint file (empty for pretrained)
+    """
+
+    modality: str = "image"
+    encoder_name: str = "clip"
+    embedding_dim: int = 512
+    normalize_embeddings: bool = True
+    output_key: str = "global"
+    runtime_framework: str = "torch"
+    checkpoint: str = ""
+
+
+@dataclass
+class AudioConfig:
+    """Configuration for audio processing and Perch 2.0 integration.
+
+    This dataclass defines audio preprocessing parameters and integration
+    settings for the Perch 2.0 bioacoustic encoder (offline placeholder mode).
+
+    Attributes:
+        enable_audio: Whether to enable audio modality processing
+        sample_rate_hz: Target sample rate for audio resampling
+        window_seconds: Duration of each analysis window in seconds
+        window_hop_seconds: Hop size between consecutive windows
+        channel_count: Number of audio channels (1 for mono)
+        preprocessing_policy: Preprocessing pipeline identifier
+        provenance_tag: Data source tag for tracking/auditing
+        cache_namespace: Namespace for audio embedding cache storage
+    """
+
+    enable_audio: bool = False
+    sample_rate_hz: int = 32000
+    window_seconds: float = 5.0
+    window_hop_seconds: float = 5.0
+    channel_count: int = 1
+    preprocessing_policy: str = "perch2-default"
+    provenance_tag: str = "offline-placeholder"
+    cache_namespace: str = "audio_embeddings"
 
 
 @dataclass
@@ -111,7 +171,7 @@ class ClassificationConfig:
 
     # Neural Network (MLP) classifier settings (optional)
     use_nn: bool = False
-    nn_hidden_sizes: list = None  # e.g., [512] or [512, 256]
+    nn_hidden_sizes: Optional[list[int]] = None  # e.g., [512] or [512, 256]
     nn_activation: str = "relu"  # 'relu' | 'gelu' | 'tanh'
     nn_dropout: float = 0.1
     nn_epochs: int = 20
@@ -129,9 +189,7 @@ class ClassificationConfig:
     enable_masked_global: bool = False
     masked_global_weight: float = 0.5
     masked_global_layer: str = "layer_9"
-    masked_global_source: str = (
-        "discriminative_mask"  # 'discriminative_mask' | 'attention'
-    )
+    masked_global_source: str = "discriminative_mask"  # 'discriminative_mask' | 'attention'
 
     # Global subcenters on global features
     enable_global_subcenters: bool = False
@@ -180,9 +238,7 @@ class SupportSetConfig:
     prototype_cache_dir: str = "cache/prototypes"
     # Prototype refinement (EMA)
     enable_prototype_ema: bool = True
-    prototype_ema_momentum: float = (
-        0.05  # EMA momentum when updating with confident queries
-    )
+    prototype_ema_momentum: float = 0.05  # EMA momentum when updating with confident queries
     prototype_ema_min_conf: float = 0.8  # only update when confidence above threshold
 
     # Embedding cache settings
@@ -212,11 +268,35 @@ class VisualizationConfig:
 
 
 @dataclass
+class EvaluationConfig:
+    """Configuration for episodic evaluation protocol.
+
+    This dataclass controls the few-shot evaluation methodology,
+    including number of episodes and confidence interval settings.
+
+    Attributes:
+        mode: Evaluation mode ('legacy', 'episodic', or 'compare')
+        episodes: Number of episodes to run for episodic evaluation
+        confidence_level: Confidence level for statistical intervals (0-1)
+        split: Dataset split to evaluate ('base', 'novel', or None for all)
+    """
+
+    mode: str = "legacy"
+    episodes: int = 100
+    confidence_level: float = 0.95
+    split: Optional[str] = None
+
+
+@dataclass
 class Config:
     """Main configuration class combining all sub-configurations"""
 
     model: ModelConfig = field(default_factory=ModelConfig)
+    encoder: EncoderConfig = field(default_factory=EncoderConfig)
+    audio: AudioConfig = field(default_factory=AudioConfig)
+    episode: EpisodeConfig = field(default_factory=EpisodeConfig)
     classification: ClassificationConfig = field(default_factory=ClassificationConfig)
+    evaluation: EvaluationConfig = field(default_factory=EvaluationConfig)
     support_set: SupportSetConfig = field(default_factory=SupportSetConfig)
     visualization: VisualizationConfig = field(default_factory=VisualizationConfig)
     adapter: AdapterConfig = field(default_factory=AdapterConfig)
@@ -229,23 +309,18 @@ class Config:
     @classmethod
     def from_file(cls, config_path: str) -> "Config":
         """Load configuration from YAML or JSON file"""
-        config_path = Path(config_path)
+        config_file = Path(config_path)
 
-        if not config_path.exists():
-            raise FileNotFoundError(f"Configuration file not found: {config_path}")
+        if not config_file.exists():
+            raise FileNotFoundError(f"Configuration file not found: {config_file}")
 
-        with open(config_path, "r", encoding="utf-8") as f:
-            if (
-                config_path.suffix.lower() == ".yaml"
-                or config_path.suffix.lower() == ".yml"
-            ):
+        with open(config_file, "r", encoding="utf-8") as f:
+            if config_file.suffix.lower() == ".yaml" or config_file.suffix.lower() == ".yml":
                 data = yaml.safe_load(f)
-            elif config_path.suffix.lower() == ".json":
+            elif config_file.suffix.lower() == ".json":
                 data = json.load(f)
             else:
-                raise ValueError(
-                    f"Unsupported config file format: {config_path.suffix}"
-                )
+                raise ValueError(f"Unsupported config file format: {config_file.suffix}")
 
         return cls.from_dict(data)
 
@@ -260,11 +335,31 @@ class Config:
                 if hasattr(config.model, key):
                     setattr(config.model, key, value)
 
+        if "encoder" in data:
+            for key, value in data["encoder"].items():
+                if hasattr(config.encoder, key):
+                    setattr(config.encoder, key, value)
+
+        if "audio" in data:
+            for key, value in data["audio"].items():
+                if hasattr(config.audio, key):
+                    setattr(config.audio, key, value)
+
+        if "episode" in data:
+            for key, value in data["episode"].items():
+                if hasattr(config.episode, key):
+                    setattr(config.episode, key, value)
+
         # Update classification config
         if "classification" in data:
             for key, value in data["classification"].items():
                 if hasattr(config.classification, key):
                     setattr(config.classification, key, value)
+
+        if "evaluation" in data:
+            for key, value in data["evaluation"].items():
+                if hasattr(config.evaluation, key):
+                    setattr(config.evaluation, key, value)
 
         # Update adapter config
         if "adapter" in data:
@@ -295,7 +390,11 @@ class Config:
         """Convert configuration to dictionary"""
         return {
             "model": asdict(self.model),
+            "encoder": asdict(self.encoder),
+            "audio": asdict(self.audio),
+            "episode": asdict(self.episode),
             "classification": asdict(self.classification),
+            "evaluation": asdict(self.evaluation),
             "adapter": asdict(self.adapter),
             "support_set": asdict(self.support_set),
             "visualization": asdict(self.visualization),
@@ -304,22 +403,27 @@ class Config:
             "log_level": self.log_level,
         }
 
-    def save(self, config_path: str):
-        """Save configuration to file"""
-        config_path = Path(config_path)
-        config_path.parent.mkdir(parents=True, exist_ok=True)
+    def save(self, config_path: Union[str, Path]) -> None:
+        """Save configuration to a YAML or JSON file.
+
+        Args:
+            config_path: Output file path as string or ``Path``.
+
+        Raises:
+            ValueError: If file extension is unsupported.
+        """
+        config_file = Path(config_path)
+        config_file.parent.mkdir(parents=True, exist_ok=True)
 
         data = self.to_dict()
 
-        with open(config_path, "w", encoding="utf-8") as f:
-            if config_path.suffix.lower() in [".yaml", ".yml"]:
+        with open(config_file, "w", encoding="utf-8") as f:
+            if config_file.suffix.lower() in [".yaml", ".yml"]:
                 yaml.dump(data, f, default_flow_style=False, indent=2)
-            elif config_path.suffix.lower() == ".json":
+            elif config_file.suffix.lower() == ".json":
                 json.dump(data, f, indent=2, ensure_ascii=False)
             else:
-                raise ValueError(
-                    f"Unsupported config file format: {config_path.suffix}"
-                )
+                raise ValueError(f"Unsupported config file format: {config_file.suffix}")
 
     def validate(self):
         """Validate configuration parameters"""
@@ -331,8 +435,29 @@ class Config:
         ):
             raise ValueError(f"Invalid CLIP model name: {self.model.clip_model_name}")
 
+        if self.encoder.embedding_dim < 1:
+            raise ValueError("encoder.embedding_dim must be at least 1")
+
+        if self.audio.sample_rate_hz < 1:
+            raise ValueError("audio.sample_rate_hz must be at least 1")
+        if self.audio.window_seconds <= 0:
+            raise ValueError("audio.window_seconds must be positive")
+        if self.audio.window_hop_seconds <= 0:
+            raise ValueError("audio.window_hop_seconds must be positive")
+        if self.audio.channel_count != 1:
+            raise ValueError("audio.channel_count must be 1 for current audio placeholder")
+
         if self.model.device not in ["cuda", "cpu"]:
             raise ValueError(f"Unsupported device: {self.model.device}")
+
+        if self.model.lora_rank < 1:
+            raise ValueError("model.lora_rank must be at least 1")
+
+        if self.model.lora_alpha <= 0:
+            raise ValueError("model.lora_alpha must be > 0")
+
+        if not 0 <= self.model.lora_dropout < 1:
+            raise ValueError("model.lora_dropout must be in [0, 1)")
 
         # Validate classification config
         if not 0 <= self.classification.visual_weight <= 1:
@@ -341,15 +466,20 @@ class Config:
         if not 0 <= self.classification.text_weight <= 1:
             raise ValueError("text_weight must be between 0 and 1")
 
-        if (
-            abs(
-                self.classification.visual_weight
-                + self.classification.text_weight
-                - 1.0
-            )
-            > 1e-6
-        ):
+        if abs(self.classification.visual_weight + self.classification.text_weight - 1.0) > 1e-6:
             raise ValueError("visual_weight + text_weight must equal 1.0")
+
+        if self.evaluation.mode not in ["legacy", "episodic", "compare"]:
+            raise ValueError("evaluation.mode must be one of: legacy, episodic, compare")
+
+        if self.evaluation.episodes < 1:
+            raise ValueError("evaluation.episodes must be at least 1")
+
+        if not 0 < self.evaluation.confidence_level < 1:
+            raise ValueError("evaluation.confidence_level must be between 0 and 1")
+
+        if self.evaluation.split not in [None, "base", "novel"]:
+            raise ValueError("evaluation.split must be one of: None, 'base', 'novel'")
 
         # Validate support set config
         if self.support_set.min_shots_per_class < 1:

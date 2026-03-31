@@ -52,3 +52,6 @@ data/processed/
 *.key
 credentials.json
 service_account.json
+
+# Assets
+assets/

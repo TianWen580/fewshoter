@@ -1,5 +1,6 @@
 import inspect
 from importlib import import_module
+from pathlib import Path
 from typing import cast
 
 
@@ -57,6 +58,16 @@ def test_create_feature_extractor_accepts_config(monkeypatch) -> None:
     assert captured["model_name"] == config.model.clip_model_name
 
 
+def test_legacy_multiscale_extractor_wraps_image_adapter() -> None:
+    feature_extractor_module = import_module("fewshoter.features.feature_extractor")
+    modalities_image_module = import_module("fewshoter.modalities.image")
+
+    assert issubclass(
+        feature_extractor_module.MultiScaleFeatureExtractor,
+        modalities_image_module.CLIPImageEncoderAdapter,
+    )
+
+
 def test_create_classifier_accepts_support_manager_and_config(
     monkeypatch,
 ) -> None:
@@ -85,3 +96,103 @@ def test_create_classifier_accepts_support_manager_and_config(
     assert isinstance(classifier, DummyClassifier)
     assert captured["support_manager"] is support_manager
     assert captured["config"] is config
+
+
+def _write_test_image(path: Path, seed: int) -> None:
+    np = import_module("numpy")
+    image_module = import_module("PIL.Image")
+
+    rng = np.random.default_rng(seed)
+    pixels = rng.integers(0, 255, size=(224, 224, 3), dtype=np.uint8)
+    image = image_module.fromarray(pixels, mode="RGB")
+    image.save(path)
+
+
+def _load_real_extractors(model_name: str):
+    pytest = import_module("pytest")
+    feature_extractor_module = import_module("fewshoter.features.feature_extractor")
+    modalities_image_module = import_module("fewshoter.modalities.image")
+
+    kwargs = {
+        "model_name": model_name,
+        "device": "cpu",
+        "cache_features": False,
+        "cache_backend": "memory",
+        "cache_dir": "cache/test_clip_parity",
+    }
+
+    try:
+        legacy = feature_extractor_module.MultiScaleFeatureExtractor(**kwargs)
+        adapter = modalities_image_module.CLIPImageEncoderAdapter(**kwargs)
+    except Exception as exc:
+        pytest.skip(f"Real CLIP model unavailable for parity test: {exc}")
+        raise AssertionError("unreachable after pytest.skip")
+
+    return legacy, adapter
+
+
+def _collect_labeled_embeddings(manager) -> list[tuple[str, object]]:
+    np = import_module("numpy")
+
+    labeled: list[tuple[str, object]] = []
+    for class_name in sorted(manager.class_names):
+        prototype = manager.prototypes[class_name]["global"]
+        labeled.append((class_name, np.asarray(prototype)))
+    return labeled
+
+
+def test_legacy_clip_and_adapter_produce_matching_embeddings_and_labels(tmp_path) -> None:
+    torch = import_module("torch")
+    config_module = import_module("fewshoter.core.config")
+    support_module = import_module("fewshoter.data.support_manager")
+
+    config = config_module.Config()
+    config.model.clip_model_name = "ViT-B/32"
+    config.model.device = "cpu"
+    config.model.cache_features = False
+    config.support_set.save_prototypes = False
+    config.support_set.save_embeddings = False
+
+    legacy_extractor, adapter = _load_real_extractors(config.model.clip_model_name)
+
+    class_names = ["class_alpha", "class_beta"]
+    image_paths: list[Path] = []
+    for class_idx, class_name in enumerate(class_names):
+        class_dir = tmp_path / class_name
+        class_dir.mkdir(parents=True, exist_ok=True)
+        for shot_idx in range(2):
+            img_path = class_dir / f"shot_{shot_idx}.png"
+            _write_test_image(img_path, seed=class_idx * 100 + shot_idx)
+            image_paths.append(img_path)
+
+    legacy_encoded = legacy_extractor.encode(image_paths)["global"].detach().cpu()
+    adapter_encoded = adapter.encode(image_paths)["global"].detach().cpu()
+
+    assert legacy_encoded.shape == adapter_encoded.shape
+    assert torch.allclose(legacy_encoded, adapter_encoded, atol=1e-6, rtol=1e-5)
+
+    support_set_manager = support_module.SupportSetManager
+    legacy_manager = support_set_manager(
+        support_dir=tmp_path,
+        feature_extractor=legacy_extractor,
+        config=config,
+    )
+    adapter_manager = support_set_manager(
+        support_dir=tmp_path,
+        feature_extractor=adapter,
+        config=config,
+    )
+
+    assert sorted(legacy_manager.class_names) == sorted(adapter_manager.class_names)
+
+    legacy_labeled = _collect_labeled_embeddings(legacy_manager)
+    adapter_labeled = _collect_labeled_embeddings(adapter_manager)
+
+    assert [label for label, _ in legacy_labeled] == [label for label, _ in adapter_labeled]
+    for (_, legacy_embedding), (_, adapter_embedding) in zip(legacy_labeled, adapter_labeled):
+        assert torch.allclose(
+            torch.as_tensor(legacy_embedding),
+            torch.as_tensor(adapter_embedding),
+            atol=1e-6,
+            rtol=1e-5,
+        )

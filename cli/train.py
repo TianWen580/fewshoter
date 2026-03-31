@@ -11,10 +11,12 @@ Usage:
 """
 
 import argparse
+import importlib
 import logging
 import sys
 from pathlib import Path
-import torch
+
+torch = importlib.import_module("torch")
 
 from ..core.config import Config, get_config
 from ..features.feature_extractor import create_feature_extractor
@@ -22,7 +24,7 @@ from ..data.support_manager import create_support_manager
 from ..core.utils import setup_logging, set_random_seed, ensure_dir
 
 
-def parse_arguments():
+def parse_arguments() -> argparse.Namespace:
     """Parse command line arguments"""
     parser = argparse.ArgumentParser(
         description="Process support set for CLIP few-shot classification"
@@ -79,6 +81,57 @@ def parse_arguments():
     )
 
     parser.add_argument(
+        "--evaluation_mode",
+        type=str,
+        default="legacy",
+        choices=["legacy", "episodic", "compare"],
+        help="Evaluation pipeline mode for downstream compatibility wiring",
+    )
+
+    parser.add_argument(
+        "--num_episodes",
+        type=int,
+        default=100,
+        help="Number of episodic tasks to evaluate when episodic mode is used",
+    )
+
+    parser.add_argument(
+        "--episode_n_way",
+        type=int,
+        default=5,
+        help="Number of classes per episodic task (N-way)",
+    )
+
+    parser.add_argument(
+        "--episode_k_shot",
+        type=int,
+        default=1,
+        help="Number of support examples per class in episodic tasks (K-shot)",
+    )
+
+    parser.add_argument(
+        "--episode_num_queries",
+        type=int,
+        default=5,
+        help="Number of query examples per class in episodic tasks",
+    )
+
+    parser.add_argument(
+        "--episode_split",
+        type=str,
+        default="none",
+        choices=["none", "base", "novel"],
+        help="Optional split selector for episodic tasks",
+    )
+
+    parser.add_argument(
+        "--confidence_level",
+        type=float,
+        default=0.95,
+        help="Confidence level for episodic confidence intervals",
+    )
+
+    parser.add_argument(
         "--log_level",
         type=str,
         default="INFO",
@@ -86,9 +139,7 @@ def parse_arguments():
         help="Logging level",
     )
 
-    parser.add_argument(
-        "--seed", type=int, default=42, help="Random seed for reproducibility"
-    )
+    parser.add_argument("--seed", type=int, default=42, help="Random seed for reproducibility")
 
     parser.add_argument(
         "--validate",
@@ -138,9 +189,7 @@ def validate_support_directory(support_dir: Path) -> bool:
     # Check each class directory for images
     valid_extensions = {".jpg", ".jpeg", ".png", ".bmp", ".tiff"}
     for class_dir in class_dirs:
-        image_files = [
-            f for f in class_dir.iterdir() if f.suffix.lower() in valid_extensions
-        ]
+        image_files = [f for f in class_dir.iterdir() if f.suffix.lower() in valid_extensions]
         if not image_files:
             print(f"Warning: No images found in class directory: {class_dir.name}")
         else:
@@ -149,7 +198,7 @@ def validate_support_directory(support_dir: Path) -> bool:
     return True
 
 
-def main():
+def main() -> None:
     """Main training function"""
     args = parse_arguments()
 
@@ -189,6 +238,13 @@ def main():
     config.model.batch_size = args.batch_size
     config.support_set.min_shots_per_class = args.min_shots
     config.support_set.max_shots_per_class = args.max_shots
+    config.evaluation.mode = args.evaluation_mode
+    config.evaluation.episodes = args.num_episodes
+    config.evaluation.confidence_level = args.confidence_level
+    config.evaluation.split = None if args.episode_split == "none" else args.episode_split
+    config.episode.n_way = args.episode_n_way
+    config.episode.k_shot = args.episode_k_shot
+    config.episode.num_queries = args.episode_num_queries
     config.log_level = args.log_level
     config.random_seed = args.seed
 
@@ -207,9 +263,7 @@ def main():
 
     try:
         # Initialize feature extractor
-        logger.info(
-            f"Initializing feature extractor with model: {config.model.clip_model_name}"
-        )
+        logger.info(f"Initializing feature extractor with model: {config.model.clip_model_name}")
         feature_extractor = create_feature_extractor(config)
 
         # Initialize support set manager
@@ -307,12 +361,8 @@ def main():
                     kernel=getattr(config.classification, "svm_kernel", "rbf"),
                     C=float(getattr(config.classification, "svm_C", 1.0)),
                     gamma=getattr(config.classification, "svm_gamma", "scale"),
-                    probability=bool(
-                        getattr(config.classification, "svm_probability", True)
-                    ),
-                    feature_layer=getattr(
-                        config.classification, "svm_feature_layer", "global"
-                    ),
+                    probability=bool(getattr(config.classification, "svm_probability", True)),
+                    feature_layer=getattr(config.classification, "svm_feature_layer", "global"),
                     use_class_weight=bool(
                         getattr(config.classification, "svm_use_class_weight", True)
                     ),
@@ -385,16 +435,12 @@ def main():
                         continue
 
                 nn_cfg = _NNConfig(
-                    hidden_sizes=list(
-                        getattr(config.classification, "nn_hidden_sizes", [512])
-                    ),
+                    hidden_sizes=list(getattr(config.classification, "nn_hidden_sizes", [512])),
                     activation=getattr(config.classification, "nn_activation", "relu"),
                     dropout=float(getattr(config.classification, "nn_dropout", 0.1)),
                     epochs=int(getattr(config.classification, "nn_epochs", 20)),
                     lr=float(getattr(config.classification, "nn_lr", 1e-3)),
-                    weight_decay=float(
-                        getattr(config.classification, "nn_weight_decay", 1e-4)
-                    ),
+                    weight_decay=float(getattr(config.classification, "nn_weight_decay", 1e-4)),
                     batch_size=int(getattr(config.classification, "nn_batch_size", 64)),
                     early_stopping_patience=int(
                         getattr(config.classification, "nn_early_stopping_patience", 5)
@@ -402,9 +448,7 @@ def main():
                     class_weight_balanced=bool(
                         getattr(config.classification, "nn_class_weight_balanced", True)
                     ),
-                    feature_layer=getattr(
-                        config.classification, "nn_feature_layer", "global"
-                    ),
+                    feature_layer=getattr(config.classification, "nn_feature_layer", "global"),
                     model_path=getattr(config.classification, "nn_model_path", None),
                     device=getattr(config.model, "device", "cpu"),
                 )
@@ -447,9 +491,7 @@ def main():
 
         print("\nTraining completed successfully!")
         print(f"Prototypes saved to: {prototypes_path}")
-        print(
-            f"Ready for inference. Use: python inference.py --prototypes {prototypes_path}"
-        )
+        print(f"Ready for inference. Use: python inference.py --prototypes {prototypes_path}")
 
     except Exception as e:
         logger.error(f"Training failed: {e}")
