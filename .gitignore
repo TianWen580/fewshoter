@@ -55,3 +55,6 @@ service_account.json
 
 # Assets
 assets/
+
+# Claude Code / OMC
+.omc/
