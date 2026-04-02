@@ -42,9 +42,7 @@ class FineGrainedClassifier:
     text probes to perform robust classification without training.
     """
 
-    def __init__(
-        self, support_manager: SupportSetManager, config: Optional[Config] = None
-    ):
+    def __init__(self, support_manager: SupportSetManager, config: Optional[Config] = None):
         """
         Initialize the classifier
 
@@ -94,13 +92,9 @@ class FineGrainedClassifier:
                         f"Loaded class descriptions from: {desc_path} ({len(dd)} entries)"
                     )
                 else:
-                    self.logger.warning(
-                        f"desc_dict not found or not a dict in {desc_path}"
-                    )
+                    self.logger.warning(f"desc_dict not found or not a dict in {desc_path}")
             except Exception as e:
-                self.logger.warning(
-                    f"Failed to load class descriptions from {desc_path}: {e}"
-                )
+                self.logger.warning(f"Failed to load class descriptions from {desc_path}: {e}")
 
         # Pre-compute text features for all classes unless pure SVM-only path
         self.text_features_cache = {}
@@ -116,9 +110,7 @@ class FineGrainedClassifier:
         if not svm_only:
             self._precompute_text_features()
         else:
-            self.logger.info(
-                "Skipping text feature precomputation (SVM-only fast init)"
-            )
+            self.logger.info("Skipping text feature precomputation (SVM-only fast init)")
 
         # Optional: initialize SVM classifier trained on support-set embeddings
         self.svm: Optional[SVMClassifier] = None
@@ -170,9 +162,7 @@ class FineGrainedClassifier:
             else:
                 # Otherwise, use generated probes from attributes and templates
                 attributes = self.support_manager.get_attributes(class_name)
-                probes = self.attribute_generator.generate_text_probes(
-                    class_name, attributes
-                )
+                probes = self.attribute_generator.generate_text_probes(class_name, attributes)
 
             # Encode probes
             text_features = self.attribute_generator.encode_text_probes(probes)
@@ -180,26 +170,34 @@ class FineGrainedClassifier:
             # Store average text feature
             if len(text_features) > 0:
                 avg_text_feature = text_features.mean(dim=0)
-                self.text_features_cache[class_name] = normalize_tensor(
-                    avg_text_feature
-                )
+                self.text_features_cache[class_name] = normalize_tensor(avg_text_feature)
             else:
                 # Fallback to basic class name
                 basic_probe = f"a photo of a {class_name}"
-                basic_features = self.attribute_generator.encode_text_probes(
-                    [basic_probe]
-                )
-                self.text_features_cache[class_name] = normalize_tensor(
-                    basic_features[0]
-                )
+                basic_features = self.attribute_generator.encode_text_probes([basic_probe])
+                self.text_features_cache[class_name] = normalize_tensor(basic_features[0])
 
-        self.logger.info(
-            f"Text features computed for {len(self.text_features_cache)} classes"
-        )
+        self.logger.info(f"Text features computed for {len(self.text_features_cache)} classes")
 
-    def _build_tta_inputs(
-        self, image_input: Union[str, Path, Image.Image, Any]
-    ) -> List[Any]:
+    def _move_features_to_cpu(self, features: Dict[str, Any]) -> Dict[str, Any]:
+        """Move all tensor features to CPU to reduce GPU memory usage."""
+        cpu_features: Dict[str, Any] = {}
+        for key, val in features.items():
+            if isinstance(val, torch.Tensor):
+                cpu_features[key] = val.detach().cpu()
+            else:
+                cpu_features[key] = val
+        return cpu_features
+
+    def _move_text_cache_to_cpu(self) -> None:
+        """Move text features cache to CPU (once)."""
+        if not hasattr(self, "_text_cache_on_cpu"):
+            for class_name, feat in self.text_features_cache.items():
+                if isinstance(feat, torch.Tensor):
+                    self.text_features_cache[class_name] = feat.detach().cpu()
+            self._text_cache_on_cpu = True
+
+    def _build_tta_inputs(self, image_input: Union[str, Path, Image.Image, Any]) -> List[Any]:
         """Build a list of augmented inputs for TTA.
         Currently supports: original + optional horizontal flip.
         If input is not a path or PIL image, return as-is.
@@ -220,9 +218,7 @@ class FineGrainedClassifier:
         except Exception:
             return [image_input]
 
-    def _aggregate_tta_features(
-        self, feats_list: List[Dict[str, Any]]
-    ) -> Dict[str, Any]:
+    def _aggregate_tta_features(self, feats_list: List[Dict[str, Any]]) -> Dict[str, Any]:
         """Aggregate a list of feature dicts from TTA views by simple averaging."""
         if not feats_list:
             return {}
@@ -234,9 +230,7 @@ class FineGrainedClassifier:
                 continue
             v0 = vals[0]
             if isinstance(v0, torch.Tensor):
-                stacked = torch.stack(
-                    [v if v.dim() > 0 else v.unsqueeze(0) for v in vals], dim=0
-                )
+                stacked = torch.stack([v if v.dim() > 0 else v.unsqueeze(0) for v in vals], dim=0)
                 agg[k] = torch.mean(stacked, dim=0)
             else:
                 # Fallback: keep the first value (e.g., metadata) or average if numpy
@@ -286,12 +280,17 @@ class FineGrainedClassifier:
                     image_input, return_attention=True, normalize=True
                 )
 
+            # Move features to CPU if inference_device is set to cpu (avoids OOM with many classes)
+            if getattr(self.config.classification, "inference_device", "same") == "cpu":
+                query_features = self._move_features_to_cpu(query_features)
+                # Also move text features cache to CPU if not already done
+                self._move_text_cache_to_cpu()
+
             # Optional NN-only inference path (takes precedence if enabled)
             try:
                 if (
                     getattr(self, "nn", None) is not None
-                    and getattr(self.config.classification, "nn_infer_mode", "nn_only")
-                    == "nn_only"
+                    and getattr(self.config.classification, "nn_infer_mode", "nn_only") == "nn_only"
                 ):
                     pred_cls, nn_scores = self._nn_scores_for_features(
                         query_features, allowed_classes
@@ -312,9 +311,7 @@ class FineGrainedClassifier:
             try:
                 if (
                     self.svm is not None
-                    and getattr(
-                        self.config.classification, "svm_infer_mode", "svm_only"
-                    )
+                    and getattr(self.config.classification, "svm_infer_mode", "svm_only")
                     == "svm_only"
                 ):
                     pred_cls, svm_scores = self._svm_scores_for_features(
@@ -340,9 +337,7 @@ class FineGrainedClassifier:
             if allowed_classes is not None:
                 try:
                     allowed_set = set(allowed_classes)
-                    class_iter = [
-                        c for c in self.support_manager.class_names if c in allowed_set
-                    ]
+                    class_iter = [c for c in self.support_manager.class_names if c in allowed_set]
                 except Exception:
                     # Fallback to all classes if filtering fails
                     class_iter = self.support_manager.class_names
@@ -356,6 +351,11 @@ class FineGrainedClassifier:
                 if return_details:
                     detailed_results[class_name] = details
 
+                # Periodic garbage collection to prevent memory accumulation
+                if len(class_scores) % 10 == 0:
+                    import gc
+                    gc.collect()
+
             # Stage 4: Impostor-aware reranking (top-2)
             if (
                 getattr(self.config.classification, "enable_impostor_rerank", False)
@@ -363,14 +363,10 @@ class FineGrainedClassifier:
             ):
                 try:
                     strength = float(
-                        getattr(
-                            self.config.classification, "impostor_rerank_strength", 0.5
-                        )
+                        getattr(self.config.classification, "impostor_rerank_strength", 0.5)
                     )
                     # top-2 by current scores
-                    top2 = sorted(
-                        class_scores.items(), key=lambda x: x[1], reverse=True
-                    )[:2]
+                    top2 = sorted(class_scores.items(), key=lambda x: x[1], reverse=True)[:2]
                     (c1, s1), (c2, s2) = top2[0], top2[1]
                     p1 = self._compute_part_score(query_features, c1)
                     p2 = self._compute_part_score(query_features, c2)
@@ -379,12 +375,12 @@ class FineGrainedClassifier:
                         class_scores[c1] = s1 + 0.5 * delta
                         class_scores[c2] = s2 - 0.5 * delta
                         if return_details:
-                            detailed_results.setdefault(c1, {})[
-                                "impostor_rerank_delta"
-                            ] = 0.5 * delta
-                            detailed_results.setdefault(c2, {})[
-                                "impostor_rerank_delta"
-                            ] = -0.5 * delta
+                            detailed_results.setdefault(c1, {})["impostor_rerank_delta"] = (
+                                0.5 * delta
+                            )
+                            detailed_results.setdefault(c2, {})["impostor_rerank_delta"] = (
+                                -0.5 * delta
+                            )
                 except Exception as e:
                     self.logger.debug(f"Impostor rerank skipped: {e}")
 
@@ -392,33 +388,27 @@ class FineGrainedClassifier:
             try:
                 if (
                     getattr(self, "nn", None) is not None
-                    and getattr(self.config.classification, "nn_infer_mode", "nn_only")
-                    == "hybrid"
+                    and getattr(self.config.classification, "nn_infer_mode", "nn_only") == "hybrid"
                 ):
-                    _, nn_scores = self._nn_scores_for_features(
-                        query_features, allowed_classes
-                    )
+                    _, nn_scores = self._nn_scores_for_features(query_features, allowed_classes)
                     # Min-max normalize current class_scores to [0,1]
                     if class_scores:
                         vals = list(class_scores.values())
                         vmin, vmax = min(vals), max(vals)
                         if vmax > vmin:
                             norm_scores = {
-                                k: (v - vmin) / (vmax - vmin)
-                                for k, v in class_scores.items()
+                                k: (v - vmin) / (vmax - vmin) for k, v in class_scores.items()
                             }
                         else:
                             norm_scores = {k: 0.0 for k in class_scores.keys()}
                     else:
                         norm_scores = {}
-                    w_nn = float(
-                        getattr(self.config.classification, "nn_hybrid_weight", 0.5)
-                    )
+                    w_nn = float(getattr(self.config.classification, "nn_hybrid_weight", 0.5))
                     fused = {}
                     for c in class_scores.keys():
-                        fused[c] = (1.0 - w_nn) * norm_scores.get(
-                            c, 0.0
-                        ) + w_nn * float(nn_scores.get(c, 0.0))
+                        fused[c] = (1.0 - w_nn) * norm_scores.get(c, 0.0) + w_nn * float(
+                            nn_scores.get(c, 0.0)
+                        )
                     class_scores = fused
             except Exception as e:
                 self.logger.debug(f"Hybrid NN fusion skipped: {e}")
@@ -427,30 +417,23 @@ class FineGrainedClassifier:
             try:
                 if (
                     self.svm is not None
-                    and getattr(
-                        self.config.classification, "svm_infer_mode", "svm_only"
-                    )
+                    and getattr(self.config.classification, "svm_infer_mode", "svm_only")
                     == "hybrid"
                 ):
-                    _, svm_scores = self._svm_scores_for_features(
-                        query_features, allowed_classes
-                    )
+                    _, svm_scores = self._svm_scores_for_features(query_features, allowed_classes)
                     # Min-max normalize current class_scores to [0,1]
                     if class_scores:
                         vals = list(class_scores.values())
                         vmin, vmax = min(vals), max(vals)
                         if vmax > vmin:
                             norm_scores = {
-                                k: (v - vmin) / (vmax - vmin)
-                                for k, v in class_scores.items()
+                                k: (v - vmin) / (vmax - vmin) for k, v in class_scores.items()
                             }
                         else:
                             norm_scores = {k: 0.0 for k in class_scores.keys()}
                     else:
                         norm_scores = {}
-                    w = float(
-                        getattr(self.config.classification, "svm_hybrid_weight", 0.5)
-                    )
+                    w = float(getattr(self.config.classification, "svm_hybrid_weight", 0.5))
                     fused = {}
                     for c in class_scores.keys():
                         fused[c] = (1.0 - w) * norm_scores.get(c, 0.0) + w * float(
@@ -462,9 +445,7 @@ class FineGrainedClassifier:
 
             # Optional per-query score normalization across classes (mitigates global shifts)
             try:
-                norm_mode = str(
-                    getattr(self.config.classification, "score_normalization", "none")
-                )
+                norm_mode = str(getattr(self.config.classification, "score_normalization", "none"))
                 if norm_mode in ("zscore", "mean_center") and len(class_scores) >= 2:
                     vals = list(class_scores.values())
                     import math
@@ -474,17 +455,19 @@ class FineGrainedClassifier:
                     var = sum((v - mu) * (v - mu) for v in vals) / float(len(vals))
                     sd = math.sqrt(var) + 1e-8
                     if norm_mode == "zscore":
-                        class_scores = {
-                            k: float((v - mu) / sd) for k, v in class_scores.items()
-                        }
+                        class_scores = {k: float((v - mu) / sd) for k, v in class_scores.items()}
                     else:  # 'mean_center'
-                        class_scores = {
-                            k: float(v - mu) for k, v in class_scores.items()
-                        }
+                        class_scores = {k: float(v - mu) for k, v in class_scores.items()}
             except Exception as e:
                 self.logger.debug(f"Score normalization skipped: {e}")
 
-            # Find best class after optional fusion
+            if not class_scores:
+                raise ValueError(
+                    "Cannot classify: no class scores computed. "
+                    "This usually means the support set has 0 classes. "
+                    "Please check that your support directory contains valid class subdirectories with images."
+                )
+
             best_class = max(class_scores, key=class_scores.get)
             best_score = class_scores[best_class]
 
@@ -493,26 +476,18 @@ class FineGrainedClassifier:
 
             # Open-set/unknown rejection (optional): decide to label UNKNOWN based on strategy
             unknown_pred = False
-            unknown_label = str(
-                getattr(self.config.classification, "unknown_label", "UNKNOWN")
-            )
+            unknown_label = str(getattr(self.config.classification, "unknown_label", "UNKNOWN"))
             try:
                 if bool(getattr(self.config.classification, "unknown_enable", False)):
                     strategy = str(
-                        getattr(
-                            self.config.classification, "unknown_strategy", "zscore"
-                        )
+                        getattr(self.config.classification, "unknown_strategy", "zscore")
                     )
                     # Prepare common stats
                     vals = list(class_scores.values())
                     import math
 
                     mu = sum(vals) / float(len(vals)) if vals else 0.0
-                    var = (
-                        sum((v - mu) * (v - mu) for v in vals) / float(len(vals))
-                        if vals
-                        else 0.0
-                    )
+                    var = sum((v - mu) * (v - mu) for v in vals) / float(len(vals)) if vals else 0.0
                     sd = math.sqrt(var) + 1e-8
                     # Compute margin if possible
                     margin = None
@@ -546,11 +521,7 @@ class FineGrainedClassifier:
 
                         unknown_pred = (margin is not None) and (margin < thr)
                     elif strategy == "softmax_p":
-                        T = float(
-                            getattr(
-                                self.config.classification, "softmax_temperature", 10.0
-                            )
-                        )
+                        T = float(getattr(self.config.classification, "softmax_temperature", 10.0))
                         # Stable softmax
                         m = max(vals) if vals else 0.0
                         exps = [math.exp((v - m) * T) for v in vals]
@@ -566,11 +537,7 @@ class FineGrainedClassifier:
                         unknown_pred = p_max < thr
                     else:  # 'zscore' or default
                         z = (best_score - mu) / sd
-                        thr = float(
-                            getattr(
-                                self.config.classification, "unknown_z_threshold", 1.0
-                            )
-                        )
+                        thr = float(getattr(self.config.classification, "unknown_z_threshold", 1.0))
                         unknown_pred = z < thr
             except Exception as e:
                 self.logger.debug(f"Unknown rejection skipped: {e}")
@@ -594,9 +561,7 @@ class FineGrainedClassifier:
                 and len(class_scores) >= 2
             ):
                 try:
-                    sorted_pairs = sorted(
-                        class_scores.items(), key=lambda x: x[1], reverse=True
-                    )
+                    sorted_pairs = sorted(class_scores.items(), key=lambda x: x[1], reverse=True)
                     second_score = sorted_pairs[1][1]
                     margin = float(best_score - second_score)
                     thr = float(
@@ -651,13 +616,12 @@ class FineGrainedClassifier:
             self.logger.warning(f"No visual prototype found for class {class_name}")
             return 0.0, details
 
-        # Convert prototype to tensor
-        visual_prototype_tensor = torch.from_numpy(visual_prototype).to(
-            self.config.model.device
-        )
+        # Convert prototype to tensor (use CPU if inference_device is cpu)
+        inference_device = "cpu" if getattr(self.config.classification, "inference_device", "same") == "cpu" else self.config.model.device
+        visual_prototype_tensor = torch.from_numpy(visual_prototype).to(inference_device)
         visual_prototype_tensor = normalize_tensor(visual_prototype_tensor)
 
-        # Compute visual similarity
+        # Compute visual similarity (query_features already on correct device from classify())
         visual_sim = self._compute_visual_similarity(
             query_features, visual_prototype_tensor, attention_consensus, class_name
         )
@@ -667,10 +631,7 @@ class FineGrainedClassifier:
 
         # Optional adapter-based support bank similarity (Tip-Adapter style)
         adapter_sim = None
-        if (
-            getattr(self.config, "adapter", None)
-            and self.config.adapter.use_tip_adapter
-        ):
+        if getattr(self.config, "adapter", None) and self.config.adapter.use_tip_adapter:
             adapter_sim = self._compute_adapter_similarity(query_features, class_name)
 
         # Combine similarities
@@ -692,13 +653,10 @@ class FineGrainedClassifier:
         # Local patch enhancement (optional)
         if getattr(self.config.classification, "local_patch_enhance", False):
             try:
-                patch_bonus = self._compute_local_patch_bonus(
-                    query_features, class_name
-                )
+                patch_bonus = self._compute_local_patch_bonus(query_features, class_name)
                 combined_sim = (
-                    (1 - self.config.classification.local_patch_weight) * combined_sim
-                    + self.config.classification.local_patch_weight * patch_bonus
-                )
+                    1 - self.config.classification.local_patch_weight
+                ) * combined_sim + self.config.classification.local_patch_weight * patch_bonus
                 if return_details:
                     if details is None:
                         details = {}
@@ -721,9 +679,7 @@ class FineGrainedClassifier:
         calibrated_sim = combined_sim
         try:
             # global temperature
-            global_temp = getattr(
-                self.config.classification, "global_logit_temperature", None
-            )
+            global_temp = getattr(self.config.classification, "global_logit_temperature", None)
             if global_temp is not None and global_temp > 0:
                 calibrated_sim = calibrated_sim / global_temp
             # class bias
@@ -763,9 +719,9 @@ class FineGrainedClassifier:
                     "global_logit_temperature": getattr(
                         self.config.classification, "global_logit_temperature", None
                     ),
-                    "class_logit_bias": getattr(
-                        self.support_manager, "class_logit_bias", {}
-                    ).get(class_name, None),
+                    "class_logit_bias": getattr(self.support_manager, "class_logit_bias", {}).get(
+                        class_name, None
+                    ),
                 }
             )
 
@@ -778,9 +734,7 @@ class FineGrainedClassifier:
                     qg = query_features["global"]
                     if qg.dim() == 2:
                         qg = qg.squeeze(0)
-                    self.support_manager.update_prototype_with_query(
-                        class_name, "global", qg, m
-                    )
+                    self.support_manager.update_prototype_with_query(class_name, "global", qg, m)
                     # Optionally update layer_9 if available
                     if "layer_9" in query_features:
                         self.support_manager.update_prototype_with_query(
@@ -803,9 +757,7 @@ class FineGrainedClassifier:
 
         # Basic global similarity (optionally in reduced space)
         try:
-            if getattr(
-                self, "native_reducer", None
-            ) is not None and class_name in getattr(
+            if getattr(self, "native_reducer", None) is not None and class_name in getattr(
                 self, "native_reduced_prototypes", {}
             ):
                 q = query_global
@@ -824,22 +776,14 @@ class FineGrainedClassifier:
                 pr = pr / (pr.norm() + 1e-8)
                 global_sim = torch.dot(qr, pr).item()
             else:
-                global_sim = cosine_similarity(
-                    query_global, visual_prototype, dim=-1
-                ).item()
+                global_sim = cosine_similarity(query_global, visual_prototype, dim=-1).item()
         except Exception:
-            global_sim = cosine_similarity(
-                query_global, visual_prototype, dim=-1
-            ).item()
+            global_sim = cosine_similarity(query_global, visual_prototype, dim=-1).item()
 
         # Masked-Global pooling fusion (foreground emphasis)
         try:
             if bool(getattr(self.config.classification, "enable_masked_global", False)):
-                layer = str(
-                    getattr(
-                        self.config.classification, "masked_global_layer", "layer_9"
-                    )
-                )
+                layer = str(getattr(self.config.classification, "masked_global_layer", "layer_9"))
                 src = str(
                     getattr(
                         self.config.classification,
@@ -847,16 +791,12 @@ class FineGrainedClassifier:
                         "discriminative_mask",
                     )
                 )
-                w = float(
-                    getattr(self.config.classification, "masked_global_weight", 0.5)
-                )
+                w = float(getattr(self.config.classification, "masked_global_weight", 0.5))
                 if layer in query_features:
                     # Build mask from support discriminative mask or attention consensus
                     mask_np = None
                     if src == "discriminative_mask":
-                        mask_np = self.support_manager.get_discriminative_mask(
-                            class_name, layer
-                        )
+                        mask_np = self.support_manager.get_discriminative_mask(class_name, layer)
                     elif src == "attention" and attention_consensus is not None:
                         # pick attn_9 if exists else any available
                         key = (
@@ -867,17 +807,11 @@ class FineGrainedClassifier:
                         if key is not None:
                             mask_np = attention_consensus.get(key, None)
                     if mask_np is not None:
-                        m = (
-                            torch.from_numpy(mask_np)
-                            .to(self.config.model.device)
-                            .float()
-                        )
+                        # Use device from prototype/query features instead of config
+                        inference_device = visual_prototype.device
+                        m = torch.from_numpy(mask_np).to(inference_device).float()
                         Fq = query_features[layer]
-                        if (
-                            isinstance(Fq, torch.Tensor)
-                            and Fq.dim() == 4
-                            and Fq.shape[0] == 1
-                        ):
+                        if isinstance(Fq, torch.Tensor) and Fq.dim() == 4 and Fq.shape[0] == 1:
                             Fq = Fq.squeeze(0)
                         Pm = self.support_manager.get_prototype(class_name, layer)
                         if Pm is not None:
@@ -905,14 +839,10 @@ class FineGrainedClassifier:
 
         # Global subcenters fusion on global features
         try:
-            if bool(
-                getattr(self.config.classification, "enable_global_subcenters", False)
-            ):
+            if bool(getattr(self.config.classification, "enable_global_subcenters", False)):
                 centers_np = self.support_manager.get_subcenters(class_name, "global")
                 if centers_np is not None and isinstance(query_global, torch.Tensor):
-                    centers = (
-                        torch.from_numpy(centers_np).to(query_global.device).float()
-                    )
+                    centers = torch.from_numpy(centers_np).to(query_global.device).float()
                     if query_global.dim() == 2:
                         qg = query_global.squeeze(0)
                     else:
@@ -921,11 +851,7 @@ class FineGrainedClassifier:
                     centers = F.normalize(centers, dim=-1)
                     sims = torch.matmul(centers, qg)
                     sub_sim = float(torch.max(sims).item())
-                    if bool(
-                        getattr(
-                            self.config.classification, "global_subcenters_fusion", True
-                        )
-                    ):
+                    if bool(getattr(self.config.classification, "global_subcenters_fusion", True)):
                         gw = float(
                             getattr(
                                 self.config.classification,
@@ -954,10 +880,11 @@ class FineGrainedClassifier:
                         break
 
                 if query_attention is not None:
-                    # Get support attention consensus
-                    support_attention = torch.from_numpy(
-                        attention_consensus["attn_9"]
-                    ).to(self.config.model.device)
+                    # Get support attention consensus (use inference device)
+                    inference_device = visual_prototype.device
+                    support_attention = torch.from_numpy(attention_consensus["attn_9"]).to(
+                        inference_device
+                    )
 
                     # Align features (using layer features if available)
                     if "layer_9" in query_features:
@@ -968,9 +895,7 @@ class FineGrainedClassifier:
                         )
 
                         # Compute similarity with aligned features
-                        aligned_global = aligned_features.mean(
-                            dim=(-2, -1)
-                        )  # Global pool
+                        aligned_global = aligned_features.mean(dim=(-2, -1))  # Global pool
                         aligned_global = normalize_tensor(aligned_global)
 
                         aligned_sim = cosine_similarity(
@@ -994,7 +919,7 @@ class FineGrainedClassifier:
                     # ensure numpy array -> torch tensor
                     if not isinstance(B, torch.Tensor):
                         B = torch.from_numpy(B)
-                    B = B.to(self.config.model.device).float()  # [D, r]
+                    B = B.to(visual_prototype.device).float()  # [D, r]
                     # Flatten query_global to [D]
                     q = query_global
                     if q.dim() == 2:
@@ -1019,11 +944,7 @@ class FineGrainedClassifier:
                             proto_np = self.support_manager.get_prototype(nc, "global")
                             if proto_np is None:
                                 continue
-                            p = (
-                                torch.from_numpy(proto_np)
-                                .to(self.config.model.device)
-                                .float()
-                            )
+                            p = torch.from_numpy(proto_np).to(visual_prototype.device).float()
                             p = F.normalize(p, dim=-1)
                             s = cosine_similarity(q, p, dim=-1).item()
                             neigh_aff += s
@@ -1031,12 +952,8 @@ class FineGrainedClassifier:
                         if cnt > 0:
                             neigh_aff /= cnt
                     # fuse
-                    pw = float(
-                        getattr(self.config.classification, "nss_proj_weight", 0.5)
-                    )
-                    bw = float(
-                        getattr(self.config.classification, "nss_bias_weight", 0.05)
-                    )
+                    pw = float(getattr(self.config.classification, "nss_proj_weight", 0.5))
+                    bw = float(getattr(self.config.classification, "nss_bias_weight", 0.05))
                     global_sim = (1 - pw) * global_sim + pw * res_sim - bw * neigh_aff
         except Exception as e:
             self.logger.debug(f"NSS step skipped for {class_name}: {e}")
@@ -1044,20 +961,14 @@ class FineGrainedClassifier:
         # Stage 1: Discriminative mining fusion (masked local-part + global)
         try:
             if (
-                getattr(
-                    self.config.classification, "enable_discriminative_mining", False
-                )
+                getattr(self.config.classification, "enable_discriminative_mining", False)
                 and "layer_9" in query_features
             ):
                 part_w = float(
-                    getattr(
-                        self.config.classification, "discriminative_part_weight", 0.4
-                    )
+                    getattr(self.config.classification, "discriminative_part_weight", 0.4)
                 )
                 glob_w = float(
-                    getattr(
-                        self.config.classification, "discriminative_global_weight", 0.6
-                    )
+                    getattr(self.config.classification, "discriminative_global_weight", 0.6)
                 )
                 # Compute part similarity via subcenters if available
                 part_sim = self._compute_part_score(query_features, class_name)
@@ -1116,9 +1027,7 @@ class FineGrainedClassifier:
             C, H, W = Fq.shape
             T = F.normalize(Fq.view(C, -1).t(), dim=1)  # [HW, C]
             # Apply discriminative mask if exists
-            mask_np = self.support_manager.get_discriminative_mask(
-                class_name, "layer_9"
-            )
+            mask_np = self.support_manager.get_discriminative_mask(class_name, "layer_9")
             if mask_np is not None and mask_np.shape == (H, W):
                 m = torch.from_numpy(mask_np.astype(np.bool_)).to(T.device).view(-1)
                 if m.any():
@@ -1167,9 +1076,7 @@ class FineGrainedClassifier:
             beta = float(getattr(self.config.classification, "text_feat_beta", 0.5))
             expected_with_text = getattr(
                 self.svm, "feature_dim", None
-            ) is not None and self.svm.feature_dim == q_base.shape[-1] + len(
-                self.svm.class_names
-            )
+            ) is not None and self.svm.feature_dim == q_base.shape[-1] + len(self.svm.class_names)
             if use_text_feat or expected_with_text:
                 # Build S vector [C] computed from pre-reduction normalized visual qn
                 t_list = []
@@ -1232,9 +1139,7 @@ class FineGrainedClassifier:
             raise RuntimeError(
                 "SVM model path missing and support embeddings not loaded (fast init)."
             )
-        self.svm = SVMClassifier(
-            class_names=self.support_manager.class_names, cfg=svm_cfg
-        )
+        self.svm = SVMClassifier(class_names=self.support_manager.class_names, cfg=svm_cfg)
         self.svm.fit_from_support_manager(
             self.support_manager,
             svm_cfg.feature_layer,
@@ -1296,17 +1201,13 @@ class FineGrainedClassifier:
             X_list = []
             used_records = False
             try:
-                if isinstance(
-                    getattr(self.support_manager, "embed_records", None), dict
-                ):
+                if isinstance(getattr(self.support_manager, "embed_records", None), dict):
                     for cname in self.support_manager.class_names:
                         recs = self.support_manager.embed_records.get(cname, [])
                         if recs:
                             Xc = np.stack(
                                 [
-                                    np.asarray(
-                                        r.get("global", []), dtype=np.float32
-                                    ).reshape(-1)
+                                    np.asarray(r.get("global", []), dtype=np.float32).reshape(-1)
                                     for r in recs
                                     if r.get("global") is not None
                                 ],
@@ -1317,16 +1218,13 @@ class FineGrainedClassifier:
                                 used_records = True
             except Exception:
                 used_records = False
-            if not used_records and getattr(
-                self.support_manager, "embedding_source", None
-            ) in ("embed", "images"):
+            if not used_records and getattr(self.support_manager, "embedding_source", None) in (
+                "embed",
+                "images",
+            ):
                 for cname in self.support_manager.class_names:
                     bank = self.support_manager.adapter_support_bank.get(cname)
-                    if (
-                        bank is not None
-                        and isinstance(bank, torch.Tensor)
-                        and bank.numel() > 0
-                    ):
+                    if bank is not None and isinstance(bank, torch.Tensor) and bank.numel() > 0:
                         Xc = bank.detach().cpu().numpy()
                         X_list.append(Xc)
             # Fallback to prototypes if no per-image embeddings
@@ -1452,18 +1350,10 @@ class FineGrainedClassifier:
         Fq = F.normalize(Fq.view(C, -1), dim=0)  # [C, HW]
         # Apply discriminative mask if available
         try:
-            if getattr(
-                self.config.classification, "enable_discriminative_mining", False
-            ):
-                mask_np = self.support_manager.get_discriminative_mask(
-                    class_name, layer_key
-                )
+            if getattr(self.config.classification, "enable_discriminative_mining", False):
+                mask_np = self.support_manager.get_discriminative_mask(class_name, layer_key)
                 if mask_np is not None and mask_np.shape == (H, W):
-                    m = (
-                        torch.from_numpy(mask_np.astype(np.bool_))
-                        .to(Fq.device)
-                        .view(-1)
-                    )
+                    m = torch.from_numpy(mask_np.astype(np.bool_)).to(Fq.device).view(-1)
                     if m.any():
                         Fq = Fq[:, m]
         except Exception:
@@ -1494,15 +1384,32 @@ class FineGrainedClassifier:
         get weights, and aggregate similarities to produce a class score.
         """
         try:
-            support_bank = self.support_manager.adapter_support_bank.get(class_name)
-            if support_bank is None or support_bank.numel() == 0:
-                return None
+            device = self.config.model.device
+
+            # Check if we should use subcenters instead of full adapter support bank
+            if getattr(self.config.adapter, "use_subcenters_for_adapter", False):
+                centers = self.support_manager.get_subcenters(class_name, "global")
+                if centers is not None:
+                    support_bank = torch.from_numpy(centers).to(device)
+                else:
+                    # Fallback to prototype if subcenters not available
+                    proto = self.support_manager.get_prototype(class_name, "global")
+                    if proto is not None:
+                        support_bank = torch.from_numpy(proto).unsqueeze(0).to(device)
+                    else:
+                        return None
+            else:
+                support_bank = self.support_manager.adapter_support_bank.get(class_name)
+                if support_bank is None or support_bank.numel() == 0:
+                    return None
+                support_bank = support_bank.to(device)
+
             q = query_features["global"]
             if q.dim() == 2:
                 q = q.squeeze(0)
             # Normalize
             q = F.normalize(q.float(), dim=-1)
-            S = F.normalize(support_bank.to(self.config.model.device).float(), dim=-1)
+            S = F.normalize(support_bank.float(), dim=-1)
             # [shots]
             sims = torch.matmul(S, q)
             # Temperature softmax
@@ -1603,8 +1510,7 @@ class FineGrainedClassifier:
             "top2_score": top2_score,
             "confidence_gap": confidence_gap,
             "confidence_level": confidence_level,
-            "is_confident": confidence_gap
-            > self.config.classification.confidence_threshold,
+            "is_confident": confidence_gap > self.config.classification.confidence_threshold,
         }
 
     def get_top_k_predictions(
@@ -1624,9 +1530,7 @@ class FineGrainedClassifier:
 
         self.logger.info(f"Updated weights: visual={visual_weight}, text={text_weight}")
 
-    def save_classification_results(
-        self, results: List[Dict], output_path: Union[str, Path]
-    ):
+    def save_classification_results(self, results: List[Dict], output_path: Union[str, Path]):
         """Save classification results to file"""
         save_results(results, output_path)
         self.logger.info(f"Results saved to: {output_path}")
@@ -1661,8 +1565,6 @@ class FineGrainedClassifier:
         )
 
 
-def create_classifier(
-    support_manager: SupportSetManager, config: Config
-) -> FineGrainedClassifier:
+def create_classifier(support_manager: SupportSetManager, config: Config) -> FineGrainedClassifier:
     """Factory function to create classifier"""
     return FineGrainedClassifier(support_manager=support_manager, config=config)

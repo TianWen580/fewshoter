@@ -83,7 +83,9 @@ class SupportSetManager:
 
         # Temp holders
         self._tmp_support_globals = {}
-        self._tmp_layer9_by_class = {}  # {class_name: [torch.Tensor[C, H, W]]}
+        # Margin accumulator for incremental discriminative mining (memory-efficient)
+        self._margin_accumulator = {}  # {class_name: np.ndarray[H, W]}
+        self._margin_counter = {}  # {class_name: int}
 
         self.logger = logging.getLogger(__name__)
         # Embedding cache per class for saving to embed.json
@@ -291,19 +293,6 @@ class SupportSetManager:
                             img_flip, return_attention=True, normalize=True
                         )
                         class_features.append(aug_feats)
-                        # Cache layer_9 spatial for mining
-                        try:
-                            if "layer_9" in aug_feats and isinstance(
-                                aug_feats["layer_9"], torch.Tensor
-                            ):
-                                f9 = aug_feats["layer_9"]
-                                if f9.dim() == 4 and f9.shape[0] == 1:
-                                    f9 = f9.squeeze(0)
-                                self._tmp_layer9_by_class.setdefault(
-                                    class_name, []
-                                ).append(f9.cpu())
-                        except Exception:
-                            pass
                         # Store global for calibration later and embed cache
                         try:
                             if "global" in aug_feats:
@@ -353,16 +342,6 @@ class SupportSetManager:
                     pass
 
                 # Cache layer_9 spatial features for discriminative mining
-                try:
-                    if "layer_9" in features and isinstance(
-                        features["layer_9"], torch.Tensor
-                    ):
-                        f9 = features["layer_9"]
-                        if f9.dim() == 4 and f9.shape[0] == 1:
-                            f9 = f9.squeeze(0)  # [C, H, W]
-                        if class_name not in self._tmp_layer9_by_class:
-                            self._tmp_layer9_by_class[class_name] = []
-                        self._tmp_layer9_by_class[class_name].append(f9.cpu())
                 except Exception:
                     pass
 
@@ -632,6 +611,7 @@ class SupportSetManager:
     def _compute_discriminative_structures(self):
         """Build per-class discriminative masks and subcenter prototypes (Stage 1).
         Uses layer_9 spatial features and global prototypes contrastively.
+        Implements incremental margin computation to reduce memory footprint.
         """
         try:
             if not getattr(
@@ -660,64 +640,114 @@ class SupportSetManager:
                 )
             )
             num_sub = int(getattr(self.config.classification, "num_subcenters", 3))
+
+            # Initialize margin accumulators for memory-efficient processing
+            self._margin_accumulator = {}
+            self._margin_counter = {}
+
             for c in all_names:
-                feats_list = self._tmp_layer9_by_class.get(c, [])
-                if len(feats_list) == 0:
+                # Process each class incrementally: extract features, compute margin, accumulate
+                image_paths = self.support_images.get(c, [])
+                if len(image_paths) == 0:
                     continue
-                # Build saliency maps per image
-                saliency_maps = []
+
                 other_names = [x for x in all_names if x != c]
                 p_self = proto_mat[c]
-                for F in feats_list:
-                    # F: torch.Tensor [C, H, W] on CPU
-                    C, H, W = F.shape
-                    X = F.view(C, -1).float().numpy()  # [C, HW]
-                    # L2 normalize along feature dim
-                    X /= np.linalg.norm(X, axis=0, keepdims=True) + 1e-8
-                    # sim to self and others
-                    s_self = (p_self @ X).reshape(H, W)
-                    max_other = -1e9
-                    for oc in other_names:
-                        s = proto_mat[oc] @ X
-                        if max_other == -1e9:
-                            max_other = s
+
+                # Accumulate margins incrementally per image
+                margin_accumulator = None
+                margin_count = 0
+                subcenter_features = []  # For k-means subcenters
+
+                for img_path in image_paths:
+                    try:
+                        # Extract layer_9 features directly from image
+                        features = self.feature_extractor.extract_features(
+                            img_path, return_attention=False, normalize=True
+                        )
+                        if "layer_9" not in features:
+                            continue
+
+                        f9 = features["layer_9"]
+                        if isinstance(f9, torch.Tensor):
+                            if f9.dim() == 4 and f9.shape[0] == 1:
+                                f9 = f9.squeeze(0)
+                            f9 = f9.cpu()
+
+                        C, H, W = f9.shape
+                        X = f9.view(C, -1).float().numpy()  # [C, HW]
+
+                        # Store for subcenter computation (sampled patches)
+                        x_patches = f9.view(C, -1).t().float().numpy()  # [HW, C]
+                        if x_patches.shape[0] > 2000:
+                            idx = np.random.choice(
+                                x_patches.shape[0], 2000, replace=False
+                            )
+                            x_patches = x_patches[idx]
+                        subcenter_features.append(x_patches)
+
+                        # L2 normalize along feature dim
+                        X /= np.linalg.norm(X, axis=0, keepdims=True) + 1e-8
+
+                        # Compute similarity to self and others
+                        s_self = (p_self @ X).reshape(H, W)
+                        max_other = -1e9
+                        for oc in other_names:
+                            s = proto_mat[oc] @ X
+                            if max_other == -1e9:
+                                max_other = s
+                            else:
+                                max_other = np.maximum(max_other, s)
+                        s_other = max_other.reshape(H, W)
+                        margin = s_self - s_other
+
+                        # Normalize to [0, 1]
+                        m_min, m_max = float(margin.min()), float(margin.max())
+                        if m_max > m_min:
+                            margin = (margin - m_min) / (m_max - m_min)
                         else:
-                            max_other = np.maximum(max_other, s)
-                    s_other = max_other.reshape(H, W)
-                    margin = s_self - s_other
-                    # normalize to [0,1]
-                    m_min, m_max = float(margin.min()), float(margin.max())
-                    if m_max > m_min:
-                        margin = (margin - m_min) / (m_max - m_min)
-                    else:
-                        margin = np.zeros_like(margin)
-                    saliency_maps.append(margin)
-                # consensus saliency
-                S = np.mean(np.stack(saliency_maps, axis=0), axis=0)
-                # top-k mask
-                flat = S.flatten()
-                k = max(1, int(round(topk_ratio * flat.size)))
-                thr = np.partition(flat, -k)[-k]
-                mask = (S >= thr).astype(np.float32)
-                self.discriminative_masks.setdefault(c, {})["layer_9"] = mask
-                # Subcenters via simple k-means on patch features (sampled)
+                            margin = np.zeros_like(margin)
+
+                        # Accumulate margin (incremental computation)
+                        if margin_accumulator is None:
+                            margin_accumulator = margin
+                        else:
+                            margin_accumulator += margin
+                        margin_count += 1
+
+                        # Explicitly free memory
+                        del f9, X, features
+
+                    except Exception:
+                        continue
+
+                # Store accumulated results
+                if margin_accumulator is not None and margin_count > 0:
+                    self._margin_accumulator[c] = margin_accumulator
+                    self._margin_counter[c] = margin_count
+
+                    # Compute consensus saliency (average margin)
+                    S = margin_accumulator / margin_count
+
+                    # Top-k mask
+                    flat = S.flatten()
+                    k = max(1, int(round(topk_ratio * flat.size)))
+                    thr = np.partition(flat, -k)[-k]
+                    mask = (S >= thr).astype(np.float32)
+                    self.discriminative_masks.setdefault(c, {})["layer_9"] = mask
+
+                # Subcenters via k-means on collected patch features
                 try:
-                    X_all = []
-                    for F in feats_list:
-                        C, H, W = F.shape
-                        x = F.view(C, -1).t().float().numpy()  # [HW, C]
-                        # sample up to 2000 patches per class for speed
-                        if x.shape[0] > 2000:
-                            idx = np.random.choice(x.shape[0], 2000, replace=False)
-                            x = x[idx]
-                        X_all.append(x)
-                    X_all = np.concatenate(X_all, axis=0).astype(np.float32)
-                    # L2 normalize
-                    X_all /= np.linalg.norm(X_all, axis=1, keepdims=True) + 1e-8
-                    centers = self._kmeans_lite(X_all, num_sub)
-                    self.subcenter_prototypes.setdefault(c, {})["layer_9"] = (
-                        centers.astype(np.float32)
-                    )
+                    if subcenter_features:
+                        X_all = np.concatenate(
+                            subcenter_features, axis=0
+                        ).astype(np.float32)
+                        # L2 normalize
+                        X_all /= np.linalg.norm(X_all, axis=1, keepdims=True) + 1e-8
+                        centers = self._kmeans_lite(X_all, num_sub)
+                        self.subcenter_prototypes.setdefault(c, {})["layer_9"] = (
+                            centers.astype(np.float32)
+                        )
                 except Exception:
                     pass
             # Optional: Global subcenters on global features
@@ -865,7 +895,20 @@ class SupportSetManager:
         return validation_results
 
     def save_prototypes(self, output_path: Optional[Union[str, Path]] = None):
-        """Save prototypes and metadata to file"""
+        """Save prototypes and metadata to file
+
+        Args:
+            output_path: Output file path. Defaults to support_dir/prototypes.json
+
+        The saved content is controlled by config.support_set.save_full_cache:
+        - False (default): Saves minimal inference-essential data only
+        - True: Saves all debugging/visualization data (larger file size)
+
+        Always saved: class_names, prototypes (global), config, text_calibration,
+                      visual_calibration, small_head, subcenters
+        Only when save_full_cache=True: attention_consensus, discriminative_masks,
+                                        nss_bases, nss_neighbors, full adapter_support_bank
+        """
         if output_path is None:
             output_path = (
                 self.support_dir / "prototypes.json"
@@ -876,86 +919,94 @@ class SupportSetManager:
         output_path = Path(output_path)
         ensure_dir(output_path.parent)
 
-        # Prepare data for serialization
+        # Check if we should save full cache or minimal cache
+        save_full = getattr(self.config.support_set, "save_full_cache", False)
+
+        # Prepare data for serialization - minimal required for inference
         metadata = {
             "class_names": self.class_names,
             "prototypes": {},
-            "attention_consensus": {},
-            "attributes": self.attribute_dict,
-            "statistics": self.class_statistics,
             "config": self.config.to_dict(),
-            "adapter_support_bank": {},
             "text_calibration": getattr(self, "text_calibration", {}),
             "visual_calibration": getattr(self, "visual_calibration", {}),
-            "nss_neighbors": getattr(self, "nss_neighbors", {}),
-            "nss_bases": {},
-            "discriminative_masks": {},
             "subcenters": {},
             "small_head": None,
         }
 
-        # Convert numpy arrays to lists
+        # Only include these fields when save_full_cache is True
+        if save_full:
+            metadata["attention_consensus"] = {}
+            metadata["attributes"] = self.attribute_dict
+            metadata["statistics"] = self.class_statistics
+            metadata["adapter_support_bank"] = {}
+            metadata["nss_neighbors"] = getattr(self, "nss_neighbors", {})
+            metadata["nss_bases"] = {}
+            metadata["discriminative_masks"] = {}
+
+        # Convert numpy arrays to lists - always save prototypes (required)
         for class_name in self.class_names:
             if class_name in self.prototypes:
                 metadata["prototypes"][class_name] = {}
                 for scale, prototype in self.prototypes[class_name].items():
                     metadata["prototypes"][class_name][scale] = prototype.tolist()
 
-            if class_name in self.attention_consensus:
-                metadata["attention_consensus"][class_name] = {}
-                for attn_type, consensus in self.attention_consensus[
-                    class_name
-                ].items():
-                    metadata["attention_consensus"][class_name][attn_type] = (
-                        consensus.tolist()
-                    )
-
-            # Save discriminative masks
-            if (
-                getattr(self, "discriminative_masks", None)
-                and class_name in self.discriminative_masks
-            ):
-                try:
-                    metadata["discriminative_masks"][class_name] = {}
-                    for layer, mask in self.discriminative_masks[class_name].items():
-                        metadata["discriminative_masks"][class_name][layer] = (
-                            mask.tolist()
-                        )
-                except Exception:
-                    pass
-
-            # Save subcenter prototypes
+            # Save subcenter prototypes (useful for enhanced inference)
             if (
                 getattr(self, "subcenter_prototypes", None)
                 and class_name in self.subcenter_prototypes
             ):
                 try:
-                    metadata["subcenters"][class_name] = {}
                     for layer, centers in self.subcenter_prototypes[class_name].items():
                         metadata["subcenters"][class_name][layer] = centers.tolist()
                 except Exception:
                     pass
 
-            # Save adapter support bank
-            if class_name in self.adapter_support_bank:
-                try:
-                    metadata["adapter_support_bank"][class_name] = (
-                        self.adapter_support_bank[class_name].tolist()
-                    )
-                except Exception:
-                    pass
-
-            # Save NSS basis if available
-            if getattr(self, "nss_bases", None) and class_name in self.nss_bases:
-                try:
-                    metadata["nss_bases"][class_name] = self.nss_bases[
+            # Below fields only saved when save_full_cache is True
+            if save_full:
+                # Attention consensus (for visualization/debugging)
+                if class_name in self.attention_consensus:
+                    metadata["attention_consensus"][class_name] = {}
+                    for attn_type, consensus in self.attention_consensus[
                         class_name
-                    ].tolist()
-                except Exception:
-                    pass
+                    ].items():
+                        metadata["attention_consensus"][class_name][attn_type] = (
+                            consensus.tolist()
+                        )
+
+                # Discriminative masks (for visualization/debugging)
+                if (
+                    getattr(self, "discriminative_masks", None)
+                    and class_name in self.discriminative_masks
+                ):
+                    try:
+                        metadata["discriminative_masks"][class_name] = {}
+                        for layer, mask in self.discriminative_masks[class_name].items():
+                            metadata["discriminative_masks"][class_name][layer] = (
+                                mask.tolist()
+                            )
+                    except Exception:
+                        pass
+
+                # Adapter support bank (only in embed.json when save_full_cache=False)
+                if class_name in self.adapter_support_bank:
+                    try:
+                        metadata["adapter_support_bank"][class_name] = (
+                            self.adapter_support_bank[class_name].tolist()
+                        )
+                    except Exception:
+                        pass
+
+                # NSS basis (for visualization/debugging)
+                if getattr(self, "nss_bases", None) and class_name in self.nss_bases:
+                    try:
+                        metadata["nss_bases"][class_name] = self.nss_bases[
+                            class_name
+                        ].tolist()
+                    except Exception:
+                        pass
 
         # Save to file
-        # Save small head if available
+        # Save small head if available (always saved when present)
         try:
             if getattr(self, "small_head", None) is not None:
                 sh = self.small_head
@@ -974,17 +1025,22 @@ class SupportSetManager:
         with open(output_path, "w", encoding="utf-8") as f:
             json.dump(metadata, f, indent=2, ensure_ascii=False)
 
-        self.logger.info(f"Prototypes saved to: {output_path}")
+        self.logger.info(f"Prototypes saved to: {output_path} (full_cache={save_full})")
 
     def save_embeddings(self, output_path: Optional[Union[str, Path]] = None):
         """
         Save per-image embeddings to embed.json for SVM/NN training reuse.
         Also include per-class text embeddings computed from optional descriptions or generated probes.
+
+        When save_full_cache=False (default), adapter_support_bank is ONLY saved here in embed.json,
+        not in prototypes.json, to avoid duplication and reduce cache file sizes.
+
         Format:
         {
           "class_names": [...],
           "embeddings": { class_name: [ {"image": rel_path, "global": [..] }, ... ] },
-          "text_features": { class_name: [..] }
+          "text_features": { class_name: [..] },
+          "adapter_support_bank": { class_name: [[...], ...] }  # only when save_full_cache=False
         }
         """
         if output_path is None:
@@ -994,6 +1050,9 @@ class SupportSetManager:
             output_path = self.support_dir / fname if self.support_dir else fname
         output_path = Path(output_path)
         ensure_dir(output_path.parent)
+
+        # Check if we should save full cache or minimal cache
+        save_full = getattr(self.config.support_set, "save_full_cache", False)
 
         # Build text features per class
         text_feat_map: Dict[str, List[float]] = {}
@@ -1051,18 +1110,40 @@ class SupportSetManager:
             # If anything fails, keep empty map
             text_feat_map = {c: [] for c in self.class_names}
 
+        # Build main data structure
         data = {
             "class_names": self.class_names,
             "embeddings": {c: self.embed_records.get(c, []) for c in self.class_names},
             "text_features": text_feat_map,
         }
+
+        # When save_full_cache=False, save adapter_support_bank ONLY in embed.json
+        # (not in prototypes.json) to avoid duplication
+        if not save_full:
+            adapter_bank: Dict[str, Any] = {}
+            for class_name in self.class_names:
+                if class_name in self.adapter_support_bank:
+                    try:
+                        adapter_bank[class_name] = self.adapter_support_bank[
+                            class_name
+                        ].tolist()
+                    except Exception:
+                        pass
+            data["adapter_support_bank"] = adapter_bank
+
         with open(output_path, "w", encoding="utf-8") as f:
             json.dump(data, f, indent=2, ensure_ascii=False)
-        self.logger.info(f"Embeddings saved to: {output_path}")
+        self.logger.info(
+            f"Embeddings saved to: {output_path} (adapter_bank={'included' if not save_full else 'omitted, in prototypes.json'})"
+        )
 
     def load_embeddings(self, embed_path: Union[str, Path]):
         """
         Load per-image embeddings from embed.json and rebuild support_images and adapter_support_bank.
+
+        Supports two formats:
+        1. New format (save_full_cache=False): adapter_support_bank stored directly in embed.json
+        2. Legacy format: adapter_support_bank reconstructed from embeddings[].global
         """
         embed_path = Path(embed_path)
         if not embed_path.exists():
@@ -1075,6 +1156,15 @@ class SupportSetManager:
         self.support_images = {c: [] for c in self.class_names}
         self.adapter_support_bank = {}
         self.embedding_source = "embed"
+
+        # Try to load adapter_support_bank directly first (new format)
+        direct_bank = data.get("adapter_support_bank", {})
+        for cname, arr in direct_bank.items():
+            try:
+                self.adapter_support_bank[cname] = torch.tensor(arr, dtype=torch.float32)
+            except Exception:
+                pass
+
         for cname, recs in emb.items():
             feats = []
             imgs = []
@@ -1092,12 +1182,14 @@ class SupportSetManager:
                 except Exception:
                     continue
             if feats:
-                try:
-                    self.adapter_support_bank[cname] = torch.tensor(
-                        np.stack(feats, axis=0)
-                    )
-                except Exception:
-                    pass
+                # Only reconstruct from embeddings if not already loaded directly
+                if cname not in self.adapter_support_bank:
+                    try:
+                        self.adapter_support_bank[cname] = torch.tensor(
+                            np.stack(feats, axis=0)
+                        )
+                    except Exception:
+                        pass
             self.support_images[cname] = imgs
         # Mirror embed content into embed_records for round-trip consistency
         self.embed_records = {c: emb.get(c, []) for c in self.class_names}
@@ -1171,15 +1263,35 @@ class SupportSetManager:
         if manager.embedding_source is None:
             manager.embedding_source = "prototypes"
 
-        # Load adapter support bank only if adapter is enabled
+        # Load adapter support bank - with backward compatibility
+        # New behavior (save_full_cache=False): adapter_support_bank is in embed.json only
+        # Old behavior (save_full_cache=True or legacy): adapter_support_bank is in prototypes.json
         manager.adapter_support_bank = {}
         try:
             if getattr(manager.config.adapter, "use_tip_adapter", True):
-                for class_name, arr in metadata.get("adapter_support_bank", {}).items():
-                    try:
-                        manager.adapter_support_bank[class_name] = torch.tensor(arr)
-                    except Exception:
-                        pass
+                # First try to load from prototypes.json (for save_full_cache=True or legacy)
+                adapter_bank_meta = metadata.get("adapter_support_bank", {})
+                if adapter_bank_meta:
+                    for class_name, arr in adapter_bank_meta.items():
+                        try:
+                            manager.adapter_support_bank[class_name] = torch.tensor(arr)
+                        except Exception:
+                            pass
+                # If not found in prototypes.json, try embed.json (new default behavior)
+                if not manager.adapter_support_bank:
+                    embed_path = manager.support_dir / "embed.json"
+                    if embed_path.exists():
+                        try:
+                            with open(embed_path, "r", encoding="utf-8") as f:
+                                embed_data = json.load(f)
+                            embed_bank = embed_data.get("adapter_support_bank", {})
+                            for class_name, arr in embed_bank.items():
+                                try:
+                                    manager.adapter_support_bank[class_name] = torch.tensor(arr, dtype=torch.float32)
+                                except Exception:
+                                    pass
+                        except Exception:
+                            pass
         except Exception:
             manager.adapter_support_bank = {}
 
@@ -1239,14 +1351,15 @@ class SupportSetManager:
             for scale, prototype_list in class_prototypes.items():
                 manager.prototypes[class_name][scale] = np.array(prototype_list)
 
-        # Convert attention consensus back to numpy arrays
+        # Convert attention consensus back to numpy arrays (only if present - optional data)
         manager.attention_consensus = {}
-        for class_name, class_attention in metadata["attention_consensus"].items():
-            manager.attention_consensus[class_name] = {}
-            for attn_type, consensus_list in class_attention.items():
-                manager.attention_consensus[class_name][attn_type] = np.array(
-                    consensus_list
-                )
+        if "attention_consensus" in metadata:
+            for class_name, class_attention in metadata["attention_consensus"].items():
+                manager.attention_consensus[class_name] = {}
+                for attn_type, consensus_list in class_attention.items():
+                    manager.attention_consensus[class_name][attn_type] = np.array(
+                        consensus_list
+                    )
 
         # Load NSS neighbors and bases if NSS is enabled
         manager.nss_neighbors = {}

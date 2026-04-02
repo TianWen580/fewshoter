@@ -100,6 +100,8 @@ class ClassificationConfig:
     max_text_probes: int = 5
     use_feature_alignment: bool = True
     alignment_strength: float = 0.1
+    # Device for similarity computation: 'same' (use model device) | 'cpu' (force CPU to avoid OOM)
+    inference_device: str = "same"
     # Text calibration toggle
     enable_text_calibration: bool = True
     # Local patch enhancement
@@ -214,6 +216,10 @@ class AdapterConfig:
     alpha: float = 0.5  # fusion weight for adapter vs text when adapter path is used
     beta: float = 50.0  # temperature for similarity -> weights in adapter
 
+    # Use subcenters instead of full adapter support bank to reduce memory usage
+    # When True, uses K subcenter prototypes (default K=3) instead of all support samples
+    use_subcenters_for_adapter: bool = False
+
     # Optional small head (ArcFace/CosFace-like). Disabled by default.
     use_small_head: bool = False
     train_small_head: bool = False
@@ -252,6 +258,11 @@ class SupportSetConfig:
     enable_support_augmentation: bool = False
     support_aug_hflip: bool = True
     support_aug_multiplier: int = 1
+
+    # Cache size control: whether to save full metadata (attention, masks, etc.) or minimal required data
+    # When False (default), only saves inference-essential data: class_names, prototypes, config
+    # When True, saves all debugging/visualization data: attention_consensus, discriminative_masks, nss_bases, etc.
+    save_full_cache: bool = False
 
 
 @dataclass

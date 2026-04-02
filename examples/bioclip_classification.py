@@ -32,14 +32,16 @@ def main():
     parser.add_argument(
         "--support_dir",
         type=str,
-        default="assets/supportset/野猪",
-        help="Path to biology support set directory",
+        # required=True,
+        default="assets/supportset/野猪识别",
+        help="Path to biology support set directory (required)",
     )
     parser.add_argument(
         "--query_image",
         type=str,
+        # required=True,
         default="assets/demo/一群野猪.jpg",
-        help="Path to query image of biological specimen",
+        help="Path to query image of biological specimen (required)",
     )
     parser.add_argument(
         "--model",
@@ -81,15 +83,21 @@ def main():
     print("\n[1/5] Configuring for biology classification...")
     config = Config()
     config.model.clip_model_name = args.model
-    config.model.device = args.device
-    config.model.cache_features = True
+    # Force CPU to avoid MPS memory issues with large BioCLIP model
+    config.model.device = "cpu"
+    config.model.cache_features = False  # Disable cache to reduce memory
     config.model.batch_size = 4
+    # Force CPU for classification to avoid OOM with many classes
+    config.classification.inference_device = "cpu"
 
     config.classification.visual_weight = 0.8
     config.classification.text_weight = 0.2
     config.classification.confidence_threshold = 0.6
     config.classification.enable_discriminative_mining = False
     config.classification.enable_impostor_rerank = False
+    # Disable memory-intensive features
+    config.classification.use_feature_alignment = False
+    config.classification.local_patch_enhance = False
 
     # Enable NSS if requested (helps distinguish similar species)
     if args.enable_nss:
