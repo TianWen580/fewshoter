@@ -32,15 +32,13 @@ def main():
     parser.add_argument(
         "--support_dir",
         type=str,
-        # required=True,
         default="assets/supportset/野猪识别",
         help="Path to biology support set directory (required)",
     )
     parser.add_argument(
         "--query_image",
         type=str,
-        # required=True,
-        default="assets/demo/一群野猪.jpg",
+        default="assets/demo/野猪.png",
         help="Path to query image of biological specimen (required)",
     )
     parser.add_argument(

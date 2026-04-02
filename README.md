@@ -4,275 +4,248 @@
 [![License: MIT](https://img.shields.io/badge/license-MIT-green.svg)](LICENSE)
 [![CI](https://github.com/TianWen580/fewshoter/actions/workflows/ci.yml/badge.svg)](https://github.com/TianWen580/fewshoter/actions/workflows/ci.yml)
 
-Fewshoter is a CLIP-based few-shot image classification toolkit focused on fine-grained recognition. It avoids full model fine-tuning and instead learns from a small support set with feature extraction, prototype construction, optional alignment, and hybrid visual-text reasoning.
+**Few-shot image classification without the training headache.**
+
+Classify images with just 2-5 examples per class. No model fine-tuning. No GPU required for inference. Built on CLIP with hybrid visual-text reasoning for fine-grained recognition.
+
+---
+
+## The Problem
+
+You have a classification task with:
+- **Few examples** — Maybe 2-5 images per class
+- **Fine-grained categories** — Bird species, plant varieties, product defects
+- **No time/resources for training** — Full model fine-tuning takes hours/days
+
+Traditional deep learning requires hundreds of samples and lengthy training. Fewshoter gives you **instant classification** from a handful of examples.
 
 ## Why Fewshoter
 
-- Fast adaptation with small support sets
-- Zero-training and lightweight adaptation modes
-- Pluggable heads: prototype, SVM, MLP
-- Open-set handling and calibration tools
-- Practical CLI and API workflow for production usage
+| Feature | Fewshoter | Traditional Deep Learning |
+|---------|-----------|---------------------------|
+| Samples needed | **2-5 per class** | 100+ per class |
+| Training time | **Seconds (prototype build)** | Hours to days |
+| GPU required | **No (inference)** | Yes |
+| Fine-grained support | **Yes (multi-scale + text)** | Needs custom training |
+| Open-set handling | **Built-in** | Requires extra work |
+| Adaptation | **Add new classes instantly** | Retrain from scratch |
 
-## Visual Overview
+**Key capabilities:**
 
-```text
-            +----------------------+
-            |    Support Images    |
-            +----------+-----------+
-                       |
-                       v
-      +----------------+----------------+
-      | Multi-scale Feature Extraction   |
-      +----------------+----------------+
-                       |
-         +-------------+-------------+
-         |                           |
-         v                           v
-+----------------------+   +----------------------+
-|  Visual Prototypes   |   |   Text Probes / NLP  |
-+----------+-----------+   +----------+-----------+
-           |                          |
-           +------------+-------------+
-                        v
-             +----------+----------+
-             | Hybrid Classifier   |
-             +----------+----------+
-                        |
-                        v
-             +----------+----------+
-             | Prediction + Scores |
-             +---------------------+
-```
+- **Zero-training mode** — Build prototypes, classify immediately
+- **Hybrid reasoning** — Visual similarity + text probes for better accuracy
+- **Multiple heads** — Prototype, SVM, MLP — pick what works best
+- **Calibrated confidence** — Know when predictions are uncertain
+- **Production-ready** — CLI + API server + episodic benchmarking
 
-## Product Architecture
+## Quick Demo
 
-```text
-fewshoter/
-├── cli/              # user-facing entrypoints: train/inference/evaluate/api_server
-├── core/             # config, episode contracts, and shared utilities
-├── modalities/       # encoder adapters (CLIP image, Perch audio placeholder)
-├── learners/         # few-shot learners (prototypical, base contracts)
-├── evaluation/       # evaluators (episodic, legacy, compare mode)
-├── data/             # datasets, samplers, and support-set management
-├── features/         # extraction/alignment/attribute generation/dim reduction
-├── peft/             # parameter-efficient fine-tuning (LoRA for image encoders)
-├── perch_integration/# audio pipeline contracts and Perch 2.0 placeholder
-├── engine/           # classification engines and optimization
-├── configs/          # task-specific YAML configs
-└── descriptions/     # class-level description dictionaries
-```
-
-## Quick Start
-
-### 1) Install
+### Option 1: Web Interface (Recommended for First Try)
 
 ```bash
-pip install -e .
+# Install with web demo support
+pip install fewshoter[web]
+
+# Launch interactive demo
+fewshoter-web-demo
+
+# Or with public share link
+fewshoter-web-demo --share
 ```
 
-### 2) Prepare support set
+Open http://localhost:7860 and:
+1. Select a CLIP model and click **Initialize**
+2. Upload 2-5 images per class, name each class
+3. Click **Build Prototypes**
+4. Upload a query image and get predictions!
 
-```text
+### Option 2: Command Line
+
+```bash
+# 1. Install
+pip install fewshoter
+
+# 2. Organize your support set (2-5 images per class)
 support_set/
-├── class_a/
-│   ├── 1.jpg
-│   └── 2.jpg
-└── class_b/
-    ├── 1.jpg
-    └── 2.jpg
+├── robin/
+│   ├── img1.jpg
+│   └── img2.jpg
+└── sparrow/
+    ├── img1.jpg
+    └── img2.jpg
+
+# 3. Build prototypes (takes ~2 seconds)
+fewshoter-train --support_dir support_set --output_dir outputs
+
+# 4. Classify a new image
+fewshoter-inference --prototypes outputs/prototypes.json --image query.jpg
+
+# Output:
+# Class: robin
+# Confidence: 0.87
+# Scores: {robin: 0.87, sparrow: 0.12, unknown: 0.01}
 ```
 
-### 3) Build prototypes
+**That's it.** No training loops. No hyperparameter tuning. No GPU needed for inference.
+
+## How It Works
+
+```
+┌─────────────────────────────────────────────────────────────────┐
+│                        SUPPORT IMAGES                           │
+│                    (2-5 samples per class)                      │
+└─────────────────────────┬───────────────────────────────────────┘
+                          │
+                          ▼
+┌─────────────────────────────────────────────────────────────────┐
+│              MULTI-SCALE FEATURE EXTRACTION                     │
+│         CLIP visual encoder + intermediate layer hooks          │
+└─────────────────────────┬───────────────────────────────────────┘
+                          │
+            ┌─────────────┴─────────────┐
+            ▼                           ▼
+┌───────────────────────┐   ┌───────────────────────┐
+│   VISUAL PROTOTYPES   │   │     TEXT PROBES       │
+│  (class embeddings)   │   │  (class descriptions) │
+└─────────────┬─────────┘   └─────────────┬─────────┘
+              │                           │
+              └─────────────┬─────────────┘
+                            ▼
+┌─────────────────────────────────────────────────────────────────┐
+│                    HYBRID CLASSIFIER                            │
+│         Visual similarity + Text matching + SVM/MLP             │
+└─────────────────────────┬───────────────────────────────────────┘
+                          ▼
+┌─────────────────────────────────────────────────────────────────┐
+│                PREDICTION + CONFIDENCE                          │
+│              (with open-set rejection)                          │
+└─────────────────────────────────────────────────────────────────┘
+```
+
+**Why hybrid?** Visual prototypes capture appearance. Text probes capture semantics. Together, they handle fine-grained distinctions better than either alone.
+
+## Target Users
+
+- **Biologists/Ecologists** — Species identification from few field photos
+- **Quality Control** — Defect classification with limited samples
+- **E-commerce** — Product categorization with new SKUs
+- **Medical Imaging** — Rare condition classification
+- **Researchers** — Few-shot learning benchmarking
+
+## Features in Depth
+
+### Multi-Modal Encoders
+
+- **CLIP (image)** — ViT-B/32, ViT-L/14, BioCLIP for biology tasks
+- **Perch 2.0 (audio)** — Placeholder for bird sound classification
+
+### Learners
+
+- **Prototypical Networks** — Distance-based classification
+- **Extensible base** — Add MAML, Matching Networks, Relation Networks
+
+### Evaluation Modes
 
 ```bash
-fewshoter-train \
-  --support_dir support_set \
-  --output_dir outputs \
-  --model ViT-B/32
+# Episodic benchmarking (N-way K-shot)
+fewshoter-evaluate --mode episodic --episodes 600 --n_way 5 --k_shot 5
+
+# Results with confidence intervals:
+# Accuracy: 0.823 ± 0.015 (95% CI)
 ```
 
-### 4) Run inference
+### LoRA Fine-Tuning (Optional)
 
-```bash
-fewshoter-inference \
-  --prototypes outputs/prototypes.json \
-  --image query.jpg
-```
-
-### 5) Evaluate
-
-Legacy mode (existing classifier):
-```bash
-fewshoter-evaluate \
-  --prototypes outputs/prototypes.json \
-  --test_dir test_set
-```
-
-Episodic few-shot benchmarking:
-```bash
-fewshoter-evaluate \
-  --mode episodic \
-  --episodes 600 \
-  --test_dir test_set \
-  --output_json results/episodic_5way5shot.json
-```
-
-Compare legacy vs episodic:
-```bash
-fewshoter-evaluate \
-  --mode compare \
-  --prototypes outputs/prototypes.json \
-  --test_dir test_set \
-  --output_json results/comparison.json
-```
-
-## Architecture Highlights
-
-### Modular Design
-
-The codebase follows a modular, contract-based architecture:
-
-- **Modalities**: Clean encoder interface (`ModalityEncoder`) with implementations for CLIP (image) and Perch 2.0 placeholder (audio)
-- **Learners**: Abstract base (`BaseLearner`) with prototypical networks implementation; easy to extend for MAML, matching networks, etc.
-- **Evaluation**: Multiple evaluation modes (legacy, episodic, compare) with support for N-way K-shot benchmarking and confidence intervals
-- **Data**: Episode-based dataset sampling with deterministic splits for reproducible few-shot experiments
-- **PEFT**: LoRA support scoped to image encoder branches, leaving text encoders frozen
-
-### Contracts and Type Safety
-
-Key runtime-checkable contracts ensure component interoperability:
-
-```python
-from fewshoter.modalities.base import ModalityEncoder
-from fewshoter.learners.base import BaseLearner
-from fewshoter.evaluation.base import BaseEvaluator
-
-# All contracts are Protocol classes for structural typing
-# Implementations are verified at runtime via validate_instance()
-```
-
-### Backward Compatibility
-
-The modular architecture coexists with the legacy pipeline:
-
-- Existing scripts continue to work without changes
-- Legacy CLIP path is preserved behind the image modality adapter
-- Config files support both old and new configuration sections
-- CLI maintains all existing flags while adding new episodic options
-
-## API and Python Usage
-
-### Basic Classification (Legacy Path)
-
-```python
-from fewshoter import Config, create_feature_extractor, SupportSetManager, create_classifier
-
-config = Config()
-feature_extractor = create_feature_extractor(config)
-support_manager = SupportSetManager.from_prototypes("outputs/prototypes.json", feature_extractor)
-classifier = create_classifier(support_manager, config)
-
-label, details = classifier.classify("query.jpg", return_scores=True)
-print(label, details["confidence"])
-```
-
-### Episodic Evaluation (Few-Shot Benchmarking)
-
-```python
-from fewshoter.core.config import Config
-from fewshoter.evaluation.episodic import EpisodicEvaluator
-from fewshoter.learners.prototypical import PrototypicalLearner
-
-config = Config()
-config.evaluation.mode = "episodic"
-config.evaluation.episodes = 600
-
-learner = PrototypicalLearner(distance="euclidean")
-evaluator = EpisodicEvaluator(
-    learner=learner,
-    encoder=feature_extractor,
-    n_way=5,
-    k_shot=5,
-    n_query=15
-)
-
-results = evaluator.evaluate(dataset, split="test")
-print(f"Accuracy: {results['mean_accuracy']:.3f} ± {results['ci_half_width']:.3f}")
-```
-
-### LoRA Fine-Tuning for Image Encoder
+When you have more data and want better performance:
 
 ```python
 from fewshoter.peft.lora import apply_image_encoder_lora
 
-# Apply LoRA to image encoder's visual branch
-result = apply_image_encoder_lora(
-    encoder=feature_extractor,
-    enabled=True,
-    rank=8,
-    alpha=16.0,
-    target_modules=["attn", "mlp"],
-    freeze_non_lora=True
-)
-print(f"Applied LoRA to {result['applied']} layers in {result['scope']} scope")
+# Apply LoRA to visual branch only
+apply_image_encoder_lora(encoder, rank=8, alpha=16.0)
 ```
 
-## Core Capabilities
+### Open-Set Rejection
 
-- **Multi-modal encoders**: CLIP for images, Perch 2.0-ready placeholder for audio
-- **Modular learners**: Prototypical networks with Euclidean distance, extensible base classes
-- **Episodic evaluation**: N-way K-shot benchmarking with confidence intervals
-- **LoRA support**: Parameter-efficient fine-tuning for image encoders (image branch only)
-- **Multi-scale CLIP feature extraction**: Intermediate layer hooks for spatial features
-- **Attention-guided feature alignment**: Discriminative token mining and subcenters
-- **Attribute-driven text probe generation**: Enhanced class descriptions
-- **Optional SVM and MLP classifier heads**: Alternative to prototype-based classification
-- **Dimensionality reduction and cache acceleration**: PCA and mmap/disk caching
-- **Open-set unknown rejection**: Z-score, margin, and softmax-based strategies
+Not everything fits your classes. Fewshoter detects unknown inputs:
 
-## Security and Privacy
+```python
+# Automatic unknown detection via:
+# - Z-score thresholding
+# - Margin-based rejection
+# - Softmax confidence
+```
 
-- No credentials are required by default
-- Keep data paths/configs local to your own environment
-- Do not commit private datasets, model artifacts, or generated outputs
-- Review `SECURITY.md` before deploying public services
+## Architecture
 
-## Development
+```
+fewshoter/
+├── cli/              # train, inference, evaluate, api-server
+├── core/             # Config, Episode, utilities
+├── modalities/       # CLIP (image), Perch (audio placeholder)
+├── learners/         # Prototypical + extensible base
+├── evaluation/       # Episodic + legacy benchmarking
+├── data/             # Support set management, datasets
+├── features/         # Multi-scale extraction, alignment
+├── peft/             # LoRA fine-tuning
+├── engine/           # Classifier implementations
+└── configs/          # YAML task configs
+```
+
+**Design principles:**
+
+- Contract-based modularity (Protocol classes)
+- Backward compatibility (legacy path preserved)
+- Type-safe with runtime validation
+
+## Installation
 
 ```bash
-pip install -r requirements-dev.txt
-python -m pytest
+# From PyPI (coming soon)
+pip install fewshoter
+
+# From source
+git clone https://github.com/TianWen580/fewshoter.git
+cd fewshoter
+pip install -e .
 ```
+
+## Documentation
+
+- [Support Set Guide](docs/SUPPORT_SET_GUIDE.md) — How to organize your examples
+- [Examples](examples/README.md) — BioCLIP, custom descriptions, LoRA
+- [Contributing](CONTRIBUTING.md) — Development setup
+
+## Benchmarks
+
+Coming soon: Standard few-shot benchmarks (miniImageNet, tieredImageNet, CUB-200).
 
 ## Roadmap
 
-### Completed ✓
+**Done ✓**
+- Modular architecture with contracts
+- Episodic evaluation + prototypical learner
+- LoRA for image encoder
+- BioCLIP integration
+- Web demo (Gradio)
 
-- Modular encoder/learner/evaluator architecture with contracts
-- Episodic evaluation with N-way K-shot benchmarking
-- Prototypical learner with Euclidean distance
-- LoRA support for image encoder fine-tuning
-- Perch 2.0 integration placeholder (offline mode)
-- Backward-compatible CLI with new episodic flags
+**Next**
+- ONNX/TensorRT export
+- Standard benchmark suite
 
-### In Progress
-
-- ONNX/TensorRT export path
-- Benchmark suite with standard datasets (miniImageNet, tieredImageNet, CUB)
-
-### Future
-
-- Live Perch 2.0 runtime integration (when available)
-- Additional learners: MAML, Matching Networks, Relation Networks
-- Multi-modal fusion (image + audio joint embeddings)
-- Lightweight web demo
-- Model zoo with pretrained few-shot checkpoints
+**Future**
+- MAML, Matching Networks, Relation Networks
+- Multi-modal fusion (image + audio)
+- Model zoo
 
 ## License
 
-MIT License. See [LICENSE](LICENSE).
+MIT — Free for personal and commercial use.
 
 ## Contributing
 
-Please read [CONTRIBUTING.md](CONTRIBUTING.md) before opening PRs.
+PRs welcome! See [CONTRIBUTING.md](CONTRIBUTING.md).
+
+---
+
+**Star this repo if it helps your project!**
